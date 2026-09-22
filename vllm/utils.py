@@ -59,7 +59,9 @@ from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
-import ixformer.inference.functions as ops
+
+print("======{}======".format("[PR#1] vllm/utils.py loaded, ixformer.inference.functions import REMOVED"),
+      file=__import__('sys').stderr, flush=True)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -1655,6 +1657,7 @@ def weak_ref_tensor(tensor: Any) -> Any:
     but will not keep the original tensor alive.
     """
     if isinstance(tensor, torch.Tensor):
+        from vllm import _custom_ops as ops
         return ops.weak_ref_tensor(tensor)
     else:
         return tensor
