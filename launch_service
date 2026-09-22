@@ -1,0 +1,80 @@
+#!/bin/bash
+
+export PYTHONPATH=/usr/local/corex/lib64/python3/dist-packages
+export LD_LIBRARY_PATH=/usr/local/corex/lib64:/usr/local/openmpi/lib
+export PATH=/usr/local/corex/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/corex/lib64/python3/dist-packages/bin:/usr/local/openmpi/bin
+export JAVA_HOME=/root/apps/jdk1.8.0_411
+export JRE_HOME=/root/apps/jdk1.8.0_411/jre
+export JMETER_HOME=/root/apps/apache-jmeter-5.6.3
+export CLASSPATH=.:/root/apps/jdk1.8.0_411/lib/dt.jar:/root/apps/jdk1.8.0_411/lib/tools.jar:/root/apps/apache-jmeter-5.6.3/lib/ext/ApacheJMeter_core.jar:/root/apps/apache-jmeter-5.6.3/lib/jorphan.jar:/root/apps/apache-jmeter-5.6.3/lib/logkit-2.0.jar:
+export PATH=/root/apps/apache-jmeter-5.6.3/bin:/root/apps/jdk1.8.0_411/bin:/usr/local/corex/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/corex/lib64/python3/dist-packages/bin:/usr/local/openmpi/bin
+/iluvatar/welcome.sh
+
+data
+cat /proc/cpuinfo | tail -n 50
+ixsmi
+unset CUDA_VISIBLE_DEVICES
+export
+date
+
+DEFAULT_HOST="0.0.0.0"
+DEFAULT_PORT="80"
+DEFAULT_SERVED_MODEL_NAME="llm"
+DEFAULT_MODEL_PATH="/model"
+DEFAULT_MAX_MODEL_LEN="10000"
+DEFAULT_TENSOR_PARALLEL_SIZE="1"
+DEFAULT_MAX_NUM_SEQS="64"
+DEFAULT_ENFORCE_EAGER="true"
+DEFAULT_DISABLE_LOG_REQUESTS="true"
+DEFAULT_PREFIX_CACHING="true"
+
+HOST_VAL=${HOST:-$DEFAULT_HOST}
+PORT_VAL=${PORT:-$DEFAULT_PORT}
+SERVED_MODEL_NAME_VAL=${SERVED_MODEL_NAME:-$DEFAULT_SERVED_MODEL_NAME}
+MODEL_PATH_VAL=${MODEL_PATH:-$DEFAULT_MODEL_PATH}
+MAX_MODEL_LEN_VAL=${MAX_MODEL_LEN:-$DEFAULT_MAX_MODEL_LEN}
+TENSOR_PARALLEL_SIZE_VAL=${TENSOR_PARALLEL_SIZE:-$DEFAULT_TENSOR_PARALLEL_SIZE}
+MAX_NUM_SEQS_VAL=${MAX_NUM_SEQS:-$DEFAULT_MAX_NUM_SEQS}
+INCLUDE_ENFORCE_EAGER_FLAG=${ENFORCE_EAGER:-$DEFAULT_ENFORCE_EAGER}
+INCLUDE_DISABLE_LOG_REQUESTS_FLAG=${DISABLE_LOG_REQUESTS:-$DEFAULT_DISABLE_LOG_REQUESTS}
+INCLUDE_PREFIX_CACHING_FLAG=${PREFIX_CACHING:-$DEFAULT_PREFIX_CACHING}
+
+CMD_ARGS=()
+CMD_ARGS+=(--host "$HOST_VAL")
+CMD_ARGS+=(--port "$PORT_VAL")
+
+if [[ "$INCLUDE_ENFORCE_EAGER_FLAG" != "false" && "$INCLUDE_ENFORCE_EAGER_FLAG" != "0" ]]; then
+    CMD_ARGS+=(--enforce-eager)
+fi
+if [[ "$INCLUDE_DISABLE_LOG_REQUESTS_FLAG" != "false" && "$INCLUDE_DISABLE_LOG_REQUESTS_FLAG" != "0" ]]; then
+    CMD_ARGS+=(--disable-log-requests)
+fi
+if [[ "$INCLUDE_PREFIX_CACHING_FLAG" != "false" && "$INCLUDE_PREFIX_CACHING_FLAG" != "0" ]]; then
+    CMD_ARGS+=(--enable-prefix-caching)
+fi
+
+CMD_ARGS+=(--served-model-name "$SERVED_MODEL_NAME_VAL")
+CMD_ARGS+=(--model "$MODEL_PATH_VAL")
+CMD_ARGS+=(--max-model-len "$MAX_MODEL_LEN_VAL")
+CMD_ARGS+=(--tensor-parallel-size "$TENSOR_PARALLEL_SIZE_VAL")
+CMD_ARGS+=(--max-num-seqs "$MAX_NUM_SEQS_VAL")
+CMD_ARGS+=(--trust-remote-code)
+
+echo "--------------------------------------------------"
+echo "Starting VLLM OpenAI API Server..."
+echo "Using effective arguments:"
+echo "  Host (--host):                  $HOST_VAL"
+echo "  Port (--port):                  $PORT_VAL"
+echo "  Enforce Eager (--enforce-eager):" $([[ "$INCLUDE_ENFORCE_EAGER_FLAG" != "false" && "$INCLUDE_ENFORCE_EAGER_FLAG" != "0" ]] && echo "Enabled" || echo "Disabled (Env: ENFORCE_EAGER=$ENFORCE_EAGER)")
+echo "  Disable Log Req (--disable-log-requests):" $([[ "$INCLUDE_DISABLE_LOG_REQUESTS_FLAG" != "false" && "$INCLUDE_DISABLE_LOG_REQUESTS_FLAG" != "0" ]] && echo "Enabled" || echo "Disabled (Env: DISABLE_LOG_REQUESTS=$DISABLE_LOG_REQUESTS)")
+echo "  Served Model Name (--served-model-name): $SERVED_MODEL_NAME_VAL"
+echo "  Model Path (--model):           $MODEL_PATH_VAL"
+echo "  Max Model Length (--max-model-len): $MAX_MODEL_LEN_VAL"
+echo "  Tensor Parallel Size (--tensor-parallel-size): $TENSOR_PARALLEL_SIZE_VAL"
+echo "  Max Num Seqs (--max-num-seqs):  $MAX_NUM_SEQS_VAL"
+echo "--------------------------------------------------"
+echo "Full cmd:"
+echo "python3 -m vllm.entrypoints.openai.api_server ${CMD_ARGS[*]}"
+echo "--------------------------------------------------"
+
+python3 -m vllm.entrypoints.openai.api_server "${CMD_ARGS[@]}"

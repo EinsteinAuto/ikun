@@ -1,0 +1,10 @@
+# Force LF line endings for all text files
+* text=auto eol=lf
+*.py text eol=lf
+*.sh text eol=lf
+*.cu text eol=lf
+*.cuh text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+Dockerfile text eol=lf

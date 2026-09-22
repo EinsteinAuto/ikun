@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.egg-info/
+*.log
+*rizhi*
+.DS_Store
+# build 产物（源码在，可重编译）
+ex_engine/build/
+ex_engine/*/build/
+qwen3_6_scripts/*/build/
