@@ -6,12 +6,14 @@ VLLM_SYSTEM = "/usr/local/corex/lib/python3/dist-packages/vllm"
 VLLM_SYSTEM2 = "/usr/local/corex/lib64/python3/dist-packages/vllm"
 
 PREBUILT = [
-    "corex_attn_head_rms_norm", "corex_block_major_kv_transfer",
+    "corex_attn_head_rms_norm", "corex_batched_gemm",
+    "corex_block_major_kv_transfer",
     "corex_fused_paged_prefill", "corex_gdn_beta_decay",
     "corex_gdn_causal_conv", "corex_gdn_chunk_recurrent",
     "corex_gdn_gated_norm", "corex_gdn_packed_decode",
     "corex_gdn_qk_map", "corex_moe_direct_routed",
-    "corex_moe_exact_reduce", "corex_moe_topk_softmax",
+    "corex_moe_exact_reduce", "corex_moe_index_combine",
+    "corex_moe_topk_softmax",
     "corex_moe_weight_gather", "corex_paged_kv_gather",
 ]
 
@@ -58,7 +60,7 @@ def main():
         total_fail += 1
     
     # 3. Prebuilt .so: check if install would work
-    print("\n=== 3. Prebuilt .so (14 modules) ===")
+    print("\n=== 3. Prebuilt .so (16 modules) ===")
     prebuilt_dir = "qwen3_6_scripts/prebuilt/corex-3.2.3-ivcore10"
     for name in PREBUILT:
         src = os.path.join(prebuilt_dir, f"{name}.so")

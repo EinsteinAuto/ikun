@@ -53,6 +53,7 @@ def section(title):
 
 EXPECTED_SO = [
     "corex_attn_head_rms_norm",
+    "corex_batched_gemm",
     "corex_block_major_kv_transfer",
     "corex_fused_paged_prefill",
     "corex_gdn_beta_decay",
