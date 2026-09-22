@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Diagnostic: verify all 13 prebuilt CoreX .so modules load on BI-V100.
+Diagnostic: verify all 16 prebuilt CoreX .so modules load on BI-V100.
 
 Run on the real machine AFTER docker build or inside the container:
     python3 verify_so_loading.py
 
 Checks:
-1. All 13 .so files exist in $VLLM_ROOT/
+1. All 16 .so files exist in $VLLM_ROOT/
 2. Each .so has PyInit_ symbol (pybind11)
 3. Each .so can be imported via `from vllm import corex_*`
 4. Functions inside each .so are callable
@@ -20,7 +20,7 @@ import ctypes
 import struct
 from pathlib import Path
 
-# The 13 prebuilt .so modules from qwen3_6_scripts/prebuilt/corex-3.2.3-ivcore10/
+# The 16 prebuilt .so modules from qwen3_6_scripts/prebuilt/corex-3.2.3-ivcore10/
 PREBUILT_SO = [
     "corex_attn_head_rms_norm",
     "corex_batched_gemm",
