@@ -23,15 +23,18 @@ from pathlib import Path
 # The 13 prebuilt .so modules from qwen3_6_scripts/prebuilt/corex-3.2.3-ivcore10/
 PREBUILT_SO = [
     "corex_attn_head_rms_norm",
+    "corex_batched_gemm",
     "corex_block_major_kv_transfer",
     "corex_fused_paged_prefill",
     "corex_gdn_beta_decay",
     "corex_gdn_causal_conv",
+    "corex_gdn_chunk_recurrent",
     "corex_gdn_gated_norm",
     "corex_gdn_packed_decode",
     "corex_gdn_qk_map",
     "corex_moe_direct_routed",
     "corex_moe_exact_reduce",
+    "corex_moe_index_combine",
     "corex_moe_topk_softmax",
     "corex_moe_weight_gather",
     "corex_paged_kv_gather",
@@ -137,7 +140,7 @@ def main():
         print(f"  Added {vllm_parent} to sys.path")
 
     print(f"\n{'─' * 70}")
-    print("PHASE 1: Prebuilt CoreX .so files (13 modules)")
+    print("PHASE 1: Prebuilt CoreX .so files (16 modules)")
     print(f"{'─' * 70}")
 
     results = {"ok": 0, "fail": 0}
