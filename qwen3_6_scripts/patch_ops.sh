@@ -140,22 +140,17 @@ echo "TRANSFORMERS_ROOT=${TRANSFORMERS_ROOT}"
     exit 2
 }
 
-VLLM_OVERRIDE_ROOT="./vendor_overrides/vllm"
+VLLM_OVERRIDE_ROOT="../vllm_overrides"
 [[ -d "$VLLM_OVERRIDE_ROOT" ]] || {
     printf 'vLLM override directory missing: %s\n' "$VLLM_OVERRIDE_ROOT" >&2
     exit 2
 }
 
 build_stage "installing authoritative vLLM core block overrides"
-install_patch_file \
-    "${VLLM_OVERRIDE_ROOT}/core/interfaces.py" \
-    "${VLLM_ROOT}/core/interfaces.py"
-install_patch_file \
-    "${VLLM_OVERRIDE_ROOT}/core/evictor_v2.py" \
-    "${VLLM_ROOT}/core/evictor_v2.py"
-install_patch_file \
-    "${VLLM_OVERRIDE_ROOT}/core/block/cpu_kv_content_cache.py" \
-    "${VLLM_ROOT}/core/block/cpu_kv_content_cache.py"
+# core/interfaces.py — removed: not present in vllm_overrides/
+#   (vllm/core/interfaces.py is already the correct version)
+# core/evictor_v2.py — removed: identical to vllm/core/evictor_v2.py
+# core/block/cpu_kv_content_cache.py — removed: identical to vllm/ copy
 install_patch_file \
     "${VLLM_OVERRIDE_ROOT}/core/block/cpu_gpu_block_allocator.py" \
     "${VLLM_ROOT}/core/block/cpu_gpu_block_allocator.py"
@@ -178,22 +173,9 @@ install_patch_file \
     "${VLLM_OVERRIDE_ROOT}/model_executor/layers/sampler.py" \
     "${VLLM_ROOT}/model_executor/layers/sampler.py"
 
-build_stage "installing BI100-DP data parallel overrides"
-install_patch_file \
-    "${VLLM_OVERRIDE_ROOT}/config.py" \
-    "${VLLM_ROOT}/config.py"
-install_patch_file \
-    "${VLLM_OVERRIDE_ROOT}/engine/arg_utils.py" \
-    "${VLLM_ROOT}/engine/arg_utils.py"
-install_patch_file \
-    "${VLLM_OVERRIDE_ROOT}/engine/llm_engine.py" \
-    "${VLLM_ROOT}/engine/llm_engine.py"
-install_patch_file \
-    "${VLLM_OVERRIDE_ROOT}/executor/mp_distributed_executor.py" \
-    "${VLLM_ROOT}/executor/mp_distributed_executor.py"
-install_patch_file \
-    "${VLLM_OVERRIDE_ROOT}/worker/worker.py" \
-    "${VLLM_ROOT}/worker/worker.py"
+# BI100-DP data parallel overrides — removed: config.py, engine/arg_utils.py,
+# engine/llm_engine.py, executor/mp_distributed_executor.py, worker/worker.py
+# are not present in vllm_overrides/.  vllm/ already has the correct versions.
 
 build_stage "installing hash-pinned CoreX 3.2.3 extensions"
 bash ./install_prebuilt_corex.sh "${VLLM_ROOT}"
@@ -346,174 +328,15 @@ if source != installed:
     raise SystemExit("runtime api_server overlay identity mismatch")
 PY
 
-build_stage "installing quantization layer overrides (task 13/20)"
-# --- layers/quantization: new API (lazy imports, Fp8LinearOp, block quant,
-#     EP support, ScaledMM kernels, ixformer MoE ops) -----------------------
-# The vendor image ships an older quantization module whose interfaces are
-# incompatible with the rest of the upgraded vLLM code (model_loader,
-# attention, fused_moe all reference the new API).  We replace the entire
-# subtree so every internal import resolves consistently.
-QUANT_OVERRIDE_ROOT="${VLLM_OVERRIDE_ROOT}/model_executor/layers/quantization"
-if [[ -d "$QUANT_OVERRIDE_ROOT" ]]; then
-    # Wipe stale .pyc first so Python never loads cached old bytecode
-    find "${VLLM_ROOT}/model_executor/layers/quantization" \
-         -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-    # Copy the full tree (preserves new subdirs like kernels/scaled_mm,
-    # kernels/mixed_precision, quark/, utils/configs/)
-    cp -r "${QUANT_OVERRIDE_ROOT}/." \
-          "${VLLM_ROOT}/model_executor/layers/quantization/"
-fi
+# quantization, parameter.py, utils.py, fused_moe override blocks — removed:
+# none of these subtrees/files exist in vllm_overrides/.
+# vllm/model_executor/layers/quantization/, parameter.py, utils.py, and
+# fused_moe/ are already the correct versions in the main vllm/ tree.
 
-# --- quantization dependency: parameter.py (BlockQuantScaleParameter) -------
-install_patch_file \
-    "${VLLM_OVERRIDE_ROOT}/model_executor/parameter.py" \
-    "${VLLM_ROOT}/model_executor/parameter.py"
-install_patch_file \
-    "${VLLM_OVERRIDE_ROOT}/model_executor/utils.py" \
-    "${VLLM_ROOT}/model_executor/utils.py"
-
-# --- quantization dependency: fused_moe (BLOCK enum, EP create_weights) -----
-MOE_OVERRIDE_ROOT="${VLLM_OVERRIDE_ROOT}/model_executor/layers/fused_moe"
-if [[ -d "$MOE_OVERRIDE_ROOT" ]]; then
-    for f in __init__.py layer.py cutlass_moe.py fused_moe.py fused_marlin_moe.py; do
-        [[ -f "${MOE_OVERRIDE_ROOT}/${f}" ]] && \
-            install_patch_file "${MOE_OVERRIDE_ROOT}/${f}" \
-                "${VLLM_ROOT}/model_executor/layers/fused_moe/${f}"
-    done
-fi
-
-build_stage "installing transformers_utils overrides (task 16/20)"
-# --- transformers_utils: new API required by upgraded config.py, engine,
-#     tokenizer_group, serving_chat, and chat_utils --------------------------
-# The vendor image ships older transformers_utils whose interfaces are
-# incompatible with the rest of the upgraded vLLM code:
-#   config.py      – get_config() signature (no rope_scaling/rope_theta),
-#                    patch_rope_scaling, uses_mrope, is_encoder_decoder,
-#                    get_pooling_config, get_sentence_transformer_tokenizer_config,
-#                    file_exists/file_or_path_exists signature, VllmConfig
-#   tokenizer.py   – AnyTokenizer includes TokenizerBase, encode_tokens,
-#                    decode_tokens, CachedTokenizer.max_token_id, tokenizer_mode="custom"
-#   tokenizer_group – init_tokenizer_from_configs(lora_config=...) instead of enable_lora
-#   tokenizers/    – MistralTokenizer(TokenizerBase), maybe_serialize_tool_calls
-#   processor.py   – cached_get_processor
-#   utils.py       – is_s3, maybe_model_redirect
-#   s3_utils.py    – S3Model (new file)
-#   tokenizer_base.py – TokenizerBase ABC + TokenizerRegistry (new file)
-#   detokenizer_utils.py – extracted from detokenizer.py (new file)
-#   configs/       – new model configs (Cohere2, DeepseekVLV2, H2OVL, Olmo2, etc.)
-#   processors/    – DeepseekVLV2Processor (new directory)
-TRANSFORMERS_UTILS_OVERRIDE="${VLLM_OVERRIDE_ROOT}/transformers_utils"
-if [[ -d "$TRANSFORMERS_UTILS_OVERRIDE" ]]; then
-    # Wipe stale .pyc first
-    find "${VLLM_ROOT}/transformers_utils" \
-         -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-
-    # Top-level files
-    for f in __init__.py config.py detokenizer.py detokenizer_utils.py \
-             processor.py tokenizer.py tokenizer_base.py utils.py s3_utils.py; do
-        [[ -f "${TRANSFORMERS_UTILS_OVERRIDE}/${f}" ]] && \
-            install_patch_file "${TRANSFORMERS_UTILS_OVERRIDE}/${f}" \
-                "${VLLM_ROOT}/transformers_utils/${f}"
-    done
-
-    # configs/ subdirectory (modified + new model configs)
-    if [[ -d "${TRANSFORMERS_UTILS_OVERRIDE}/configs" ]]; then
-        for f in "${TRANSFORMERS_UTILS_OVERRIDE}/configs/"*.py; do
-            [[ -f "$f" ]] && \
-                install_patch_file "$f" \
-                    "${VLLM_ROOT}/transformers_utils/configs/$(basename "$f")"
-        done
-    fi
-
-    # tokenizer_group/ subdirectory
-    if [[ -d "${TRANSFORMERS_UTILS_OVERRIDE}/tokenizer_group" ]]; then
-        for f in __init__.py base_tokenizer_group.py ray_tokenizer_group.py \
-                 tokenizer_group.py; do
-            [[ -f "${TRANSFORMERS_UTILS_OVERRIDE}/tokenizer_group/${f}" ]] && \
-                install_patch_file "${TRANSFORMERS_UTILS_OVERRIDE}/tokenizer_group/${f}" \
-                    "${VLLM_ROOT}/transformers_utils/tokenizer_group/${f}"
-        done
-    fi
-
-    # tokenizers/ subdirectory
-    if [[ -d "${TRANSFORMERS_UTILS_OVERRIDE}/tokenizers" ]]; then
-        for f in __init__.py mistral.py; do
-            [[ -f "${TRANSFORMERS_UTILS_OVERRIDE}/tokenizers/${f}" ]] && \
-                install_patch_file "${TRANSFORMERS_UTILS_OVERRIDE}/tokenizers/${f}" \
-                    "${VLLM_ROOT}/transformers_utils/tokenizers/${f}"
-        done
-    fi
-
-    # processors/ subdirectory (new)
-    if [[ -d "${TRANSFORMERS_UTILS_OVERRIDE}/processors" ]]; then
-        mkdir -p "${VLLM_ROOT}/transformers_utils/processors"
-        cp -r "${TRANSFORMERS_UTILS_OVERRIDE}/processors/." \
-              "${VLLM_ROOT}/transformers_utils/processors/"
-    fi
-fi
-
-build_stage "installing spec_decode + lora + prompt_adapter overrides (task 18/20)"
-# --- spec_decode: new PP broadcast, chunked-prefill+spec, DeepSeek MTP,
-#     EAGLE lm_head weight load, smaller_tp_pp proposer, prompt_logprobs ---
-SPEC_DECODE_OVERRIDE="${VLLM_OVERRIDE_ROOT}/spec_decode"
-if [[ -d "$SPEC_DECODE_OVERRIDE" ]]; then
-    find "${VLLM_ROOT}/spec_decode" \
-         -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-    for f in __init__.py batch_expansion.py draft_model_runner.py interfaces.py \
-             medusa_worker.py metrics.py mlp_speculator_worker.py \
-             multi_step_worker.py ngram_worker.py proposer_worker_base.py \
-             spec_decode_worker.py target_model_runner.py top1_proposer.py \
-             util.py smaller_tp_pp_proposer_worker.py; do
-        [[ -f "${SPEC_DECODE_OVERRIDE}/${f}" ]] && \
-            install_patch_file "${SPEC_DECODE_OVERRIDE}/${f}" \
-                "${VLLM_ROOT}/spec_decode/${f}"
-    done
-fi
-
-# --- lora: new PunicaWrapper (ops/torch_ops, ops/triton_ops, punica_wrapper/),
-#     PEFTHelper, bias support, BaseLinearLayerWithLoRA refactor,
-#     MergedQKVParallelLinearWithLoRA, pooling model support ---
-LORA_OVERRIDE="${VLLM_OVERRIDE_ROOT}/lora"
-if [[ -d "$LORA_OVERRIDE" ]]; then
-    find "${VLLM_ROOT}/lora" \
-         -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-    # Remove old single-file punica.py (replaced by punica_wrapper/ package)
-    rm -f "${VLLM_ROOT}/lora/punica.py" 2>/dev/null || true
-    # Top-level lora files
-    for f in __init__.py fully_sharded_layers.py layers.py lora.py models.py \
-             request.py utils.py worker_manager.py peft_helper.py; do
-        [[ -f "${LORA_OVERRIDE}/${f}" ]] && \
-            install_patch_file "${LORA_OVERRIDE}/${f}" \
-                "${VLLM_ROOT}/lora/${f}"
-    done
-    # ops/ subtree (new — replaces old bgmv/sgmv top-level files with
-    #   torch_ops/ and triton_ops/ subdirectories)
-    if [[ -d "${LORA_OVERRIDE}/ops" ]]; then
-        # Wipe stale old-style ops files (bgmv_*.py, sgmv_*.py) and __pycache__
-        find "${VLLM_ROOT}/lora/ops" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-        rm -f "${VLLM_ROOT}/lora/ops/bgmv_"*.py "${VLLM_ROOT}/lora/ops/sgmv_"*.py \
-              "${VLLM_ROOT}/lora/ops/utils.py" 2>/dev/null || true
-        mkdir -p "${VLLM_ROOT}/lora/ops"
-        cp -r "${LORA_OVERRIDE}/ops/." "${VLLM_ROOT}/lora/ops/"
-    fi
-    # punica_wrapper/ subtree (new)
-    if [[ -d "${LORA_OVERRIDE}/punica_wrapper" ]]; then
-        mkdir -p "${VLLM_ROOT}/lora/punica_wrapper"
-        cp -r "${LORA_OVERRIDE}/punica_wrapper/." "${VLLM_ROOT}/lora/punica_wrapper/"
-    fi
-fi
-
-# --- prompt_adapter: SPDX headers, minor style fixes ---
-PA_OVERRIDE="${VLLM_OVERRIDE_ROOT}/prompt_adapter"
-if [[ -d "$PA_OVERRIDE" ]]; then
-    find "${VLLM_ROOT}/prompt_adapter" \
-         -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-    for f in __init__.py layers.py models.py request.py utils.py worker_manager.py; do
-        [[ -f "${PA_OVERRIDE}/${f}" ]] && \
-            install_patch_file "${PA_OVERRIDE}/${f}" \
-                "${VLLM_ROOT}/prompt_adapter/${f}"
-    done
-fi
+# transformers_utils, spec_decode, lora, prompt_adapter override blocks — removed:
+# none of these subtrees exist in vllm_overrides/.
+# vllm/transformers_utils/, spec_decode/, lora/, prompt_adapter/ are already
+# the correct versions in the main vllm/ tree.
 
 # PRD #69: Clear ALL __pycache__ under VLLM_ROOT after every cp/patch is done.
 # py_compile below only compiles ./qwen3_6_scripts, not VLLM_ROOT, so this
