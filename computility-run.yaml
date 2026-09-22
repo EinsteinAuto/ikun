@@ -1,0 +1,55 @@
+concurrency: 1
+command:
+    - python3
+    - -m
+    - vllm.entrypoints.openai.api_server
+    - --model
+    - /model
+    - --served-model-name
+    - llm
+    - --max-model-len
+    - '131072'
+    - --gpu-memory-utilization
+    - '0.92'
+    - --trust-remote-code
+    - -tp
+    - '4'
+    - --max-num-seqs
+    - '2'
+    - --disable-log-requests
+    - --disable-frontend-multiprocessing
+    - --max-num-batched-tokens
+    - '4096'
+    - --enable-chunked-prefill
+    - --max-seq-len-to-capture
+    - '32768'
+    - --enable-auto-tool-choice
+    - --tool-call-parser
+    - qwen3_coder
+    - --reasoning-parser
+    - qwen3
+    - --enable-prefix-caching
+    - --enforce-eager
+    - --dtype
+    - half
+env:
+    - name: VLLM_ENGINE_ITERATION_TIMEOUT_S
+      value: 3600
+    - name: VLLM_ENABLE_EXPERT_PARALLEL
+      value: 0
+    - name: BI100_MAX_NUM_SEQS
+      value: 2
+    - name: BI100_MOE_COREX_DIRECT_ROUTED
+      value: 1
+    - name: BI100_MOE_COREX_TOPK_SOFTMAX
+      value: 1
+    - name: BI100_GDN_COREX_PACKED_DECODE
+      value: 1
+    - name: BI100_HYBRID_KV_ACCOUNTING
+      value: full_attention
+    - name: BI100_GDN_CACHE_POLICY
+      value: admission64
+    - name: BI100_GDN_RESTORE_MODE
+      value: hybrid64
+    - name: VLLM_IMAGE_FETCH_TIMEOUT
+      value: 10
