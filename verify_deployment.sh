@@ -164,7 +164,7 @@ import torch
 print(f'CUDA available: {torch.cuda.is_available()}')
 print(f'GPU count: {torch.cuda.device_count()}')
 for i in range(torch.cuda.device_count()):
-    print(f'  GPU {i}: {torch.cuda.get_device_name(i)}, {torch.cuda.get_device_properties(i).total_memory / 1e9:.1f} GB')
+    print(f'  GPU {i}: {torch.cuda.get_device_name(i)}, {torch.cuda.get_device_properties(i).total_mem / 1e9:.1f} GB')
 print(f'torch version: {torch.__version__}')
 import vllm
 print(f'vllm version: {vllm.__version__}')
