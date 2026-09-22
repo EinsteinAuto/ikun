@@ -88,6 +88,28 @@ if [[ -f "./patch_ixformer_infer.py" ]]; then
     python3 -c "import sys; sys.path.insert(0,'.'); import patch_ixformer_infer" 2>/dev/null || true
 fi
 
+# Create ixformer.contrib.vllm_flash_attn shim (matches Dockerfile lines 18-19).
+# vllm/attention/layer.py imports this unconditionally.
+IXFORMER_ROOT=$(python3 -c "import ixformer,os;print(os.path.dirname(ixformer.__file__))" 2>/dev/null || true)
+if [[ -n "$IXFORMER_ROOT" ]]; then
+    mkdir -p "${IXFORMER_ROOT}/contrib/vllm_flash_attn"
+    echo 'from ixformer import flash_attn_varlen_func, flash_attn_func, flash_attn_padded_func' \
+        > "${IXFORMER_ROOT}/contrib/vllm_flash_attn/__init__.py"
+    echo "[ok] created ixformer.contrib.vllm_flash_attn shim"
+
+    # Deploy ixformer.inference.functions (matches Dockerfile lines 16-17).
+    # 12 vllm/ files import this module at top level. The vendor image does
+    # not ship it; the repo provides it under ixformer_sdk/inference/functions/.
+    if [[ -d "../ixformer_sdk/inference/functions" ]]; then
+        mkdir -p "${IXFORMER_ROOT}/inference"
+        touch "${IXFORMER_ROOT}/inference/__init__.py"
+        cp -r "../ixformer_sdk/inference/functions" "${IXFORMER_ROOT}/inference/functions"
+        # Replace __init__.py with the try/except-guarded version (Dockerfile L17)
+        cp "../ixformer_inference_functions_init.py" "${IXFORMER_ROOT}/inference/functions/__init__.py"
+        echo "[ok] deployed ixformer.inference.functions ($(find ../ixformer_sdk/inference/functions -name '*.py' | wc -l) files, guarded __init__.py)"
+    fi
+fi
+
 build_stage "checking offline transformers dependency"
 # --- transformers: Qwen3_5 tokenizer / model files --------------------------
 TRANSFORMERS_REQUIRED_VERSION="4.55.3"
@@ -141,10 +163,17 @@ echo "TRANSFORMERS_ROOT=${TRANSFORMERS_ROOT}"
 }
 
 VLLM_OVERRIDE_ROOT="./vendor_overrides/vllm"
-[[ -d "$VLLM_OVERRIDE_ROOT" ]] || {
-    printf 'vLLM override directory missing: %s\n' "$VLLM_OVERRIDE_ROOT" >&2
-    exit 2
-}
+
+# The repo's vllm/ directory is the fully adapted version (same approach as
+# Dockerfile line 14: cp -rf /workspace/vllm/* "${VLLM_ROOT}/").  Deploy it
+# directly instead of going through the vendor_overrides indirection.
+build_stage "deploying adapted vllm/ tree to site-packages"
+cp -rf ../vllm/* "${VLLM_ROOT}/"
+find "${VLLM_ROOT}" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+echo "[ok] vllm overlay: $(find ../vllm -name '*.py' | wc -l) files deployed"
+
+# blake3 is required by vllm/multimodal/hasher.py (not in vendor image)
+pip3 install blake3 --break-system-packages 2>/dev/null || pip3 install blake3 2>/dev/null || true
 
 build_stage "installing authoritative vLLM core block overrides"
 install_patch_file \

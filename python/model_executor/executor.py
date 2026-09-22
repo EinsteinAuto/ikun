@@ -132,32 +132,44 @@ class ModelExecutor:
         metadata: object,
         input_embedding: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Run a single forward step, dispatching to graph runner or eager."""
+        """Run a single forward step, dispatching to graph runner or eager.
+
+        When a graph runner is configured, the request must be graph-eligible.
+        Silently falling back to eager mode would mask graph capture bugs and
+        serve from potentially inconsistent state.  Eager execution is used
+        only when no graph runner is configured at all.
+        """
         if not self._kv_bound:
             raise RuntimeError("KV caches are not bound")
 
         graph_runner = self.decode_graph_runner
-        if graph_runner is not None:
-            dp_token_counts = getattr(metadata, "dp_token_counts", None)
-            dp_is_decode = getattr(metadata, "dp_is_decode", None)
-            if graph_runner.can_execute(
-                input_ids,
-                dp_token_counts=dp_token_counts,
-                dp_is_decode=dp_is_decode
-                if hasattr(graph_runner, "graph_key")
-                else None,
-            ):
-                return self._run_graph(
-                    graph_runner, input_ids, positions, metadata, input_embedding
-                )
+        if graph_runner is None:
+            # No graph backend, run eager.  This is the only valid eager path.
+            return self.model(input_ids, positions)
 
-        # Eager fallback
-        return self.model(input_ids, positions)
+        dp_token_counts = getattr(metadata, "dp_token_counts", None)
+        dp_is_decode = getattr(metadata, "dp_is_decode", None)
+        can_run = graph_runner.can_execute(
+            input_ids,
+            dp_token_counts=dp_token_counts,
+            dp_is_decode=dp_is_decode
+            if hasattr(graph_runner, "graph_key")
+            else None,
+        )
+        if not can_run:
+            raise RuntimeError(
+                f"{type(graph_runner).__name__} cannot execute batch of "
+                f"{input_ids.shape[0]} tokens.  Implicit eager fallback "
+                f"is not permitted when a graph backend is configured, "
+                f"check graph warmup buckets or batch size limits."
+            )
+        return self._run_graph(
+            graph_runner, input_ids, positions, metadata, input_embedding
+        )
 
     def _run_graph(self, runner, input_ids, positions, metadata, input_embedding):
         """Warmup (if needed) and replay a captured graph."""
         runner.warmup(input_ids.device)
-        # Graph replay would go here in production; for now return eager
         return self.model(input_ids, positions)
 
     def bind_kv_caches(self, kv_caches: list) -> None:

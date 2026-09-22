@@ -1356,16 +1356,12 @@ class PagedAttention:
             v_scale,
         )
         if _PAGED_ATTN_DIAGNOSTICS:
-            try:
-                torch.cuda.synchronize()
-            except Exception as exc:
-                print(
-                    "[BI100 PAGED_ATTN] cache_write_sync_failed "
-                    f"pid={os.getpid()} error={type(exc).__name__}: {exc}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                raise
+            if not hasattr(PagedAttention.write_kv_cache, '_pr1_logged'):
+                print("======{}======".format(
+                    "[PR#1] write_kv_cache, try/except around cuda.synchronize() REMOVED"),
+                      file=sys.stderr, flush=True)
+                PagedAttention.write_kv_cache._pr1_logged = True
+            torch.cuda.synchronize()
 
     @staticmethod
     def _forward_decode_pytorch(
@@ -1397,61 +1393,61 @@ class PagedAttention:
         gqa_ratio = num_heads // num_kv_heads
         orig_dtype = query.dtype
 
+        if not hasattr(PagedAttention._forward_decode_pytorch, '_pr1_logged'):
+            print("======{}======".format(
+                "[PR#1] _forward_decode_pytorch, try/except catch-log-raise REMOVED, num_seqs={} num_heads={} head_dim={}".format(
+                    num_seqs, num_heads, head_dim)),
+                  file=sys.stderr, flush=True)
+            PagedAttention._forward_decode_pytorch._pr1_logged = True
+
         output = torch.empty_like(query)
 
-        try:
-            for i in range(num_seqs):
-                seq_len = int(seq_lens[i].item())
-                num_blocks = (seq_len + block_size - 1) // block_size
-                blk_ids = block_tables[i, :num_blocks]
+        for i in range(num_seqs):
+            seq_len = int(seq_lens[i].item())
+            num_blocks = (seq_len + block_size - 1) // block_size
+            blk_ids = block_tables[i, :num_blocks]
 
-                use_corex_gather = (
-                    _USE_COREX_PAGED_KV_GATHER
-                    and query.dtype == torch.float16
-                    and key_cache.dtype == torch.float16
-                    and value_cache.dtype == torch.float16
-                    and block_tables.dtype == torch.int32
-                    and key_cache.is_contiguous()
-                    and value_cache.is_contiguous()
-                    and blk_ids.is_contiguous())
-                if use_corex_gather:
-                    k_t, v_t = _corex_paged_kv_gather.gather(
-                        key_cache, value_cache, blk_ids, seq_len)
-                else:
-                    # Gather K: [kv_h, head_dim, seq_len] fp32 without GQA
-                    # expansion. The CoreX path above fuses these layout copies
-                    # and FP16-to-FP32 conversions into one kernel.
-                    k_t = (key_cache[blk_ids]
-                           .permute(0, 3, 1, 2, 4)
-                           .contiguous()
-                           .view(-1, num_kv_heads, head_dim))[:seq_len] \
-                          .permute(1, 2, 0).contiguous().float()
-                    v_t = (value_cache[blk_ids]
-                           .permute(0, 3, 1, 2)
-                           .contiguous()
-                           .view(-1, num_kv_heads, head_dim))[:seq_len] \
-                          .permute(1, 0, 2).contiguous().float()
+            use_corex_gather = (
+                _USE_COREX_PAGED_KV_GATHER
+                and query.dtype == torch.float16
+                and key_cache.dtype == torch.float16
+                and value_cache.dtype == torch.float16
+                and block_tables.dtype == torch.int32
+                and key_cache.is_contiguous()
+                and value_cache.is_contiguous()
+                and blk_ids.is_contiguous())
+            if use_corex_gather:
+                k_t, v_t = _corex_paged_kv_gather.gather(
+                    key_cache, value_cache, blk_ids, seq_len)
+            else:
+                # Gather K: [kv_h, head_dim, seq_len] fp32 without GQA
+                # expansion. The CoreX path above fuses these layout copies
+                # and FP16-to-FP32 conversions into one kernel.
+                k_t = (key_cache[blk_ids]
+                       .permute(0, 3, 1, 2, 4)
+                       .contiguous()
+                       .view(-1, num_kv_heads, head_dim))[:seq_len] \
+                      .permute(1, 2, 0).contiguous().float()
+                v_t = (value_cache[blk_ids]
+                       .permute(0, 3, 1, 2)
+                       .contiguous()
+                       .view(-1, num_kv_heads, head_dim))[:seq_len] \
+                      .permute(1, 0, 2).contiguous().float()
 
-                # Reshape Q for lazy GQA: [kv_h, gqa_ratio, 1, d]
-                q_grouped = (query[i].float()
-                             .view(num_kv_heads, gqa_ratio, head_dim)
-                             .unsqueeze(2))
+            # Reshape Q for lazy GQA: [kv_h, gqa_ratio, 1, d]
+            q_grouped = (query[i].float()
+                         .view(num_kv_heads, gqa_ratio, head_dim)
+                         .unsqueeze(2))
 
-                # [kv_h, gqa_ratio, 1, seq_len]
-                attn_w = torch.matmul(
-                    q_grouped * scale,       # [kv_h, gqa, 1, d]
-                    k_t.unsqueeze(1))        # [kv_h, 1, d, seq_len]
-                attn_w = torch.softmax(attn_w, dim=-1)
+            # [kv_h, gqa_ratio, 1, seq_len]
+            attn_w = torch.matmul(
+                q_grouped * scale,       # [kv_h, gqa, 1, d]
+                k_t.unsqueeze(1))        # [kv_h, 1, d, seq_len]
+            attn_w = torch.softmax(attn_w, dim=-1)
 
-                # [kv_h, gqa_ratio, 1, d] → [num_heads, head_dim]
-                out_i = torch.matmul(attn_w, v_t.unsqueeze(1))
-                output[i] = out_i.view(num_heads, head_dim).to(orig_dtype)
-
-        except Exception as e:
-            print(f"[decode_pytorch ERROR] {type(e).__name__}: {e}",
-                  file=sys.stderr, flush=True)
-            traceback.print_exc(file=sys.stderr)
-            raise
+            # [kv_h, gqa_ratio, 1, d] -> [num_heads, head_dim]
+            out_i = torch.matmul(attn_w, v_t.unsqueeze(1))
+            output[i] = out_i.view(num_heads, head_dim).to(orig_dtype)
 
         return output
 
@@ -1517,6 +1513,11 @@ class PagedAttention:
         blocksparse_block_size: int = 64,
         blocksparse_head_sliding_step: int = 0,
     ) -> torch.Tensor:
+        if not hasattr(PagedAttention.forward_decode, '_pr1_logged'):
+            print("======{}======".format(
+                "[PR#1] forward_decode ENTRY, paged_attn.py from PR#1 is active, query={}".format(tuple(query.shape))),
+                  file=sys.stderr, flush=True)
+            PagedAttention.forward_decode._pr1_logged = True
         # Build head_mapping from num_kv_heads for BI-V100 native kernels
         num_queries_per_kv = query.shape[1] // num_kv_heads
         head_mapping = torch.repeat_interleave(
@@ -2061,26 +2062,19 @@ class PagedAttention:
                 head_dim,
                 block_size,
             )
-            try:
-                fused_result = _corex_fused_paged_prefill.forward(
-                    query,
-                    key,
-                    value,
-                    key_cache,
-                    value_cache,
-                    active_block_table,
-                    block_context_len,
-                    scale,
-                )
-            except Exception as exc:
-                if shadow_index is not None:
-                    _finish_fused_prefill_shadow(
-                        shadow_index,
-                        status="invalid",
-                        error_stage="candidate-execution",
-                        error_type=type(exc).__name__,
-                    )
-                raise
+            # NOTE: if the kernel throws, the shadow record stays pending.
+            # The shadow report aggregator treats missing status as crashed,
+            # so no try/finally cleanup is needed here.
+            fused_result = _corex_fused_paged_prefill.forward(
+                query,
+                key,
+                value,
+                key_cache,
+                value_cache,
+                active_block_table,
+                block_context_len,
+                scale,
+            )
             if (
                 not isinstance(fused_result, (list, tuple))
                 or len(fused_result) != 2
@@ -2110,57 +2104,48 @@ class PagedAttention:
                 raise RuntimeError(
                     "corex fused paged-prefill returned an invalid output")
             if shadow_index is not None:
-                try:
-                    reference_result = (
-                        PagedAttention._forward_prefix_segment_pytorch(
-                            query,
-                            key,
-                            value,
-                            prefix_key,
-                            prefix_value,
-                            key_cache,
-                            value_cache,
-                            block_tables,
-                            seq_index,
-                            block_context_len,
-                            num_q_heads,
-                            num_kv_heads,
-                            head_dim,
-                            gqa_ratio,
-                            block_size,
-                            tile_sz,
-                            scale,
-                            orig_dtype,
-                            fused_request_eligible=False,
-                            capture_request_eligible=False,
-                            return_fp32=(
-                                _FUSED_PREFILL_SHADOW_NUMERIC_MODE
-                                == "calibrated"),
-                        ))
-                    reference_fp32 = (
-                        reference_result
-                        if _FUSED_PREFILL_SHADOW_NUMERIC_MODE
-                        == "calibrated"
-                        else None
-                    )
-                    reference_output = (
-                        reference_result.to(orig_dtype)
-                        if reference_fp32 is not None
-                        else reference_result
-                    )
-                    shadow_metrics = _compare_fused_prefill_shadow_outputs(
-                        fused_output,
-                        reference_output,
-                        reference_fp32,
-                    )
-                except Exception as exc:
-                    _finish_fused_prefill_shadow(
-                        shadow_index,
-                        status="invalid",
-                        error_stage="reference-execution",
-                        error_type=type(exc).__name__,
-                    )
-                    raise
+                reference_result = (
+                    PagedAttention._forward_prefix_segment_pytorch(
+                        query,
+                        key,
+                        value,
+                        prefix_key,
+                        prefix_value,
+                        key_cache,
+                        value_cache,
+                        block_tables,
+                        seq_index,
+                        block_context_len,
+                        num_q_heads,
+                        num_kv_heads,
+                        head_dim,
+                        gqa_ratio,
+                        block_size,
+                        tile_sz,
+                        scale,
+                        orig_dtype,
+                        fused_request_eligible=False,
+                        capture_request_eligible=False,
+                        return_fp32=(
+                            _FUSED_PREFILL_SHADOW_NUMERIC_MODE
+                            == "calibrated"),
+                    ))
+                reference_fp32 = (
+                    reference_result
+                    if _FUSED_PREFILL_SHADOW_NUMERIC_MODE
+                    == "calibrated"
+                    else None
+                )
+                reference_output = (
+                    reference_result.to(orig_dtype)
+                    if reference_fp32 is not None
+                    else reference_result
+                )
+                shadow_metrics = _compare_fused_prefill_shadow_outputs(
+                    fused_output,
+                    reference_output,
+                    reference_fp32,
+                )
                 _finish_fused_prefill_shadow(
                     shadow_index,
                     **shadow_metrics,
