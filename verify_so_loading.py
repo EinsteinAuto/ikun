@@ -224,6 +224,7 @@ def main():
             "BI100_MOE_COREX_WEIGHT_GATHER": True,
             "BI100_MOE_COREX_DIRECT_ROUTED": False,
             "BI100_MOE_COREX_TOPK_SOFTMAX": True,
+            "BI100_MOE_COREX_INDEX_COMBINE": True,
         }
 
         for env_name, default in flags.items():

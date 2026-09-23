@@ -2196,41 +2196,68 @@ class Qwen3_5MoeSparseBlock(nn.Module):
                     gate, up = gate_up.chunk(2, dim=-1)
                     act = F.silu(gate) * up
 
-                expert_out = torch.bmm(w2_sel, act.unsqueeze(-1)).squeeze(-1)
-                out = (expert_out * ws.unsqueeze(-1)).sum(
-                    0, keepdim=True).to(hidden_states.dtype)   # (1, H)
+                act_weighted = (act * ws.unsqueeze(-1)).reshape(1, -1)
+                out = _fast_linear(
+                    act_weighted,
+                    w2_sel.permute(1, 0, 2).reshape(H, -1),
+                ).to(hidden_states.dtype)
             else:
-                # --- TP mode: all 8 experts are local ---
-                # xllm warp64-safe path: gather weights → fused GEMM → combine
                 K = eids.shape[0]
                 H = hidden_states.shape[-1]
-                w13_sel = w13[eids]                                # (K, 2*I, H)
-                w2_sel = w2[eids]                                  # (K, H, I)
 
-                # FC1: single large GEMM via _fast_linear (ix_moe_bridge GEMV)
-                gate_up = _fast_linear(
-                    hidden_states,
-                    w13_sel.reshape(-1, H),                        # (K*2*I, H)
-                )                                                  # (1, K*2*I)
-                gate_up = gate_up.view(K, -1)                      # (K, 2*I)
+                use_corex_direct = (
+                    _USE_COREX_MOE_DIRECT_ROUTED
+                    and hidden_states.dtype == torch.float16
+                    and w13.dtype == torch.float16
+                    and w2.dtype == torch.float16
+                    and hidden_states.is_cuda and w13.is_cuda
+                    and hidden_states.is_contiguous()
+                    and w13.is_contiguous() and w2.is_contiguous()
+                    and w13.shape == (256, 256, 2048)
+                    and w2.shape == (256, 2048, 128)
+                    and eids.numel() == 8)
 
-                if _USE_FUSED_MOE_ACTIVATION:
-                    act = self.act_fn(gate_up)                      # (K, I)
+                if use_corex_direct:
+                    if not hasattr(self, '_direct_routed_logged'):
+                        self._direct_routed_logged = True
+                        print("=============corex_moe_direct_routed ENABLED: w13={} w2={} eids={} ws_dtype={}===========".format(
+                            tuple(w13.shape), tuple(w2.shape), tuple(eids.shape), ws.dtype))
+                    try:
+                        eids_i64 = eids.to(torch.int64)
+                        gate_up = _corex_moe_direct_routed.w13(
+                            hidden_states, w13, eids_i64)
+                        if _USE_FUSED_MOE_ACTIVATION:
+                            act = self.act_fn(gate_up)
+                        else:
+                            gate, up = gate_up.chunk(2, dim=-1)
+                            act = (F.silu(gate) * up).contiguous()
+                        out = _corex_moe_direct_routed.w2_reduce(
+                            act, w2, eids_i64, ws)
+                    except Exception as e:
+                        print("=============corex_moe_direct_routed FAILED: {}===========".format(e))
+                        raise
+                elif (_USE_COREX_BATCHED_GEMM
+                        and hidden_states.dtype == torch.float16
+                        and w13.dtype == torch.float16
+                        and w2.dtype == torch.float16):
+                    out = _corex_batched_gemm.moe_decode_fused(
+                        hidden_states, w13[eids], w2[eids], ws)
                 else:
-                    gate, up = gate_up.chunk(2, dim=-1)
-                    act = F.silu(gate) * up
-
-                # FC2: bmm (K, H, I) @ (K, I, 1) → (K, H)
-                expert_out = torch.bmm(w2_sel, act.unsqueeze(-1)).squeeze(-1)
-
-                # Combine: xllm fused kernel or PyTorch weighted sum
-                if _USE_XLLM_MOE:
-                    # expert_out is (K, H), need (1*K, H) for combine
-                    out = _xllm_moe.moe_combine_result(
-                        expert_out, ws.float().unsqueeze(0), 1, K) # (1, H)
-                else:
-                    out = (expert_out * ws.unsqueeze(-1)).sum(
-                        0, keepdim=True).to(hidden_states.dtype)   # (1, H)
+                    w13_sel = w13[eids]
+                    w2_sel = w2[eids]
+                    gate_up = _fast_linear(
+                        hidden_states, w13_sel.reshape(-1, H))
+                    gate_up = gate_up.view(K, -1)
+                    if _USE_FUSED_MOE_ACTIVATION:
+                        act = self.act_fn(gate_up)
+                    else:
+                        gate, up = gate_up.chunk(2, dim=-1)
+                        act = F.silu(gate) * up
+                    act_weighted = (act * ws.unsqueeze(-1)).reshape(1, -1)
+                    out = _fast_linear(
+                        act_weighted,
+                        w2_sel.permute(1, 0, 2).reshape(H, -1),
+                    ).to(hidden_states.dtype)
         else:
             # General path (prefill / multi-seq): group assignments once.
             out = torch.zeros_like(hidden_states)
@@ -2301,16 +2328,19 @@ class Qwen3_5MoeSparseBlock(nn.Module):
                 # Step 4: grouped GEMM w13 (gate_proj + up_proj)
                 gemm1_out = _gemm_grouped.moe_group_gemm(
                     sorted_hidden, w13, expert_counts_t)  # (T*topk, 2*I)
-                gate, up = gemm1_out.chunk(2, dim=-1)
-                act_out = F.silu(gate) * up  # (T*topk, I)
+                if _USE_FUSED_MOE_ACTIVATION:
+                    act_out = self.act_fn(gemm1_out)       # (T*topk, I)
+                else:
+                    gate, up = gemm1_out.chunk(2, dim=-1)
+                    act_out = F.silu(gate) * up            # (T*topk, I)
 
                 # Step 6: grouped GEMM w2 (down_proj)
                 gemm2_out = _gemm_grouped.moe_group_gemm(
                     act_out, w2, expert_counts_t)  # (T*topk, H)
 
                 # Step 7: weighted combine back to token order
-                flat_weights = sorted_weights.unsqueeze(-1)  # (T*topk, 1)
-                weighted = (gemm2_out * flat_weights).to(out.dtype)
+                combine_weights = sorted_weights.unsqueeze(-1)  # (T*topk, 1)
+                weighted = (gemm2_out * combine_weights).to(out.dtype)
                 out.index_add_(0, sorted_tok_ids, weighted)
             else:
                 # Fallback: per-expert F.linear loop
@@ -2323,8 +2353,11 @@ class Qwen3_5MoeSparseBlock(nn.Module):
                     tok_ids = sorted_tok_ids[start:end]
                     tokens = hidden_states[tok_ids]                # (n, H)
                     gate_up = _fast_linear(tokens, w13[eid])           # (n, 2*I)
-                    gate, up = gate_up.chunk(2, dim=-1)
-                    act = F.silu(gate) * up                        # (n, I)
+                    if _USE_FUSED_MOE_ACTIVATION:
+                        act = self.act_fn(gate_up)                 # (n, I)
+                    else:
+                        gate, up = gate_up.chunk(2, dim=-1)
+                        act = F.silu(gate) * up                    # (n, I)
                     expert_out = _fast_linear(act, w2[eid])            # (n, H)
                     weights = sorted_weights[start:end].unsqueeze(-1)
                     out.index_add_(0, tok_ids, (expert_out * weights).to(out.dtype))

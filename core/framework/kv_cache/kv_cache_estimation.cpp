@@ -326,16 +326,14 @@ std::vector<bool> resolve_indexer_cache_enabled_layers(
   return {};
 }
 
-// Upstream: build_layer_cache_owned (lines 563-574)
 std::vector<bool> build_layer_cache_owned(const ModelArgs& model_args,
                                           const LayerwiseSplitLayout& layout,
                                           int64_t num_layers) {
   std::vector<bool> layer_cache_owned;
   layer_cache_owned.reserve(static_cast<size_t>(num_layers));
   for (int64_t layer_id = 0; layer_id < num_layers; ++layer_id) {
-    layer_cache_owned.emplace_back(
-        !is_full_attention_layer(model_args, layer_id) ||
-        layout.owns(layer_id));
+    const bool is_full_attn = is_full_attention_layer(model_args, layer_id);
+    layer_cache_owned.emplace_back(is_full_attn && layout.owns(layer_id));
   }
   return layer_cache_owned;
 }

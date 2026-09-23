@@ -2223,9 +2223,11 @@ class Qwen3_5MoeSparseBlock(nn.Module):
                     gate, up = gate_up.chunk(2, dim=-1)
                     act = F.silu(gate) * up
 
-                expert_out = torch.bmm(w2_sel, act.unsqueeze(-1)).squeeze(-1)
-                out = (expert_out * ws.unsqueeze(-1)).sum(
-                    0, keepdim=True).to(hidden_states.dtype)   # (1, H)
+                act_weighted = (act * ws.unsqueeze(-1)).reshape(1, -1)
+                out = _fast_linear(
+                    act_weighted,
+                    w2_sel.permute(1, 0, 2).reshape(H, -1),
+                ).to(hidden_states.dtype)
             else:
                 # --- TP mode: all 8 experts are local ---
                 # --- corex_moe_direct_routed: zero-copy indexed GEMM (warp64) ---
@@ -2305,22 +2307,16 @@ class Qwen3_5MoeSparseBlock(nn.Module):
                 gate_up = gate_up.view(K_actual, -1)               # (K_actual, 2*I)
 
                 if _USE_FUSED_MOE_ACTIVATION:
-                    act = self.act_fn(gate_up)                      # (K_actual, I)
+                    act = self.act_fn(gate_up)
                 else:
                     gate, up = gate_up.chunk(2, dim=-1)
                     act = F.silu(gate) * up
 
-                # FC2: bmm (K_actual, H, I) @ (K_actual, I, 1) → (K_actual, H)
-                expert_out = torch.bmm(w2_sel, act.unsqueeze(-1)).squeeze(-1)
-
-                if (_USE_COREX_MOE_EXACT_REDUCE
-                        and expert_out.dtype == torch.float16
-                        and ws.dtype == torch.float16
-                        and expert_out.shape[0] == 8):
-                    out = _corex_moe_exact_reduce.serial_float(expert_out, ws)
-                else:
-                    out = (expert_out * ws.unsqueeze(-1)).sum(
-                        0, keepdim=True).to(hidden_states.dtype)   # (1, H)
+                act_weighted = (act * ws.unsqueeze(-1)).reshape(1, -1)
+                out = _fast_linear(
+                    act_weighted,
+                    w2_sel.permute(1, 0, 2).reshape(H, -1),
+                ).to(hidden_states.dtype)
         else:
             # General path (prefill / multi-seq): group assignments once.
             out = torch.zeros_like(hidden_states)
@@ -2391,16 +2387,19 @@ class Qwen3_5MoeSparseBlock(nn.Module):
                 # Step 4: grouped GEMM w13 (gate_proj + up_proj)
                 gemm1_out = _gemm_grouped.moe_group_gemm(
                     sorted_hidden, w13, expert_counts_t)  # (T*topk, 2*I)
-                gate, up = gemm1_out.chunk(2, dim=-1)
-                act_out = F.silu(gate) * up  # (T*topk, I)
+                if _USE_FUSED_MOE_ACTIVATION:
+                    act_out = self.act_fn(gemm1_out)       # (T*topk, I)
+                else:
+                    gate, up = gemm1_out.chunk(2, dim=-1)
+                    act_out = F.silu(gate) * up            # (T*topk, I)
 
                 # Step 6: grouped GEMM w2 (down_proj)
                 gemm2_out = _gemm_grouped.moe_group_gemm(
                     act_out, w2, expert_counts_t)  # (T*topk, H)
 
                 # Step 7: weighted combine back to token order
-                flat_weights = sorted_weights.unsqueeze(-1)  # (T*topk, 1)
-                weighted = (gemm2_out * flat_weights).to(out.dtype)
+                combine_weights = sorted_weights.unsqueeze(-1)  # (T*topk, 1)
+                weighted = (gemm2_out * combine_weights).to(out.dtype)
                 out.index_add_(0, sorted_tok_ids, weighted)
             else:
                 # Fallback: per-expert F.linear loop
@@ -2413,8 +2412,11 @@ class Qwen3_5MoeSparseBlock(nn.Module):
                     tok_ids = sorted_tok_ids[start:end]
                     tokens = hidden_states[tok_ids]                # (n, H)
                     gate_up = _fast_linear(tokens, w13[eid])           # (n, 2*I)
-                    gate, up = gate_up.chunk(2, dim=-1)
-                    act = F.silu(gate) * up                        # (n, I)
+                    if _USE_FUSED_MOE_ACTIVATION:
+                        act = self.act_fn(gate_up)                 # (n, I)
+                    else:
+                        gate, up = gate_up.chunk(2, dim=-1)
+                        act = F.silu(gate) * up                    # (n, I)
                     expert_out = _fast_linear(act, w2[eid])            # (n, H)
                     weights = sorted_weights[start:end].unsqueeze(-1)
                     out.index_add_(0, tok_ids, (expert_out * weights).to(out.dtype))

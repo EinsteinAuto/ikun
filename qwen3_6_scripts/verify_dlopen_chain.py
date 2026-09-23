@@ -83,6 +83,11 @@ ENV_KERNEL_MAP = {
     "BI100_MOE_COREX_DIRECT_ROUTED": "corex_moe_direct_routed",
     "BI100_MOE_COREX_TOPK_SOFTMAX": "corex_moe_topk_softmax",
     "BI100_MOE_COREX_INDEX_COMBINE": "corex_moe_index_combine",
+    "BI100_MOE_BATCHED_GEMM": "corex_batched_gemm",
+}
+
+ALWAYS_ENABLED_SO = {
+    "corex_gdn_chunk_recurrent",
 }
 
 
@@ -154,6 +159,15 @@ def verify_env_kernel_dispatch():
         elif not enabled:
             check(f"{env_var}={env_val} → {module_name}",
                   True, f"disabled (available={available})")
+
+    for module_name in sorted(ALWAYS_ENABLED_SO):
+        try:
+            mod = importlib.import_module(f"vllm.{module_name}")
+            available = mod is not None
+        except Exception:
+            available = False
+        check(f"(always-on) {module_name}",
+              True, f"available={available}")
 
 
 def verify_protocol():
