@@ -81,10 +81,16 @@ void allocate_kv_caches_layerwise(
             << owned_count << "/" << num_layers
             << " layers owned, " << scratch_count << " scratch.";
 
-  // Validate head_dim alignment for BI-V100 warp size.
+  // Validate head_dim alignment for device warp size.
+  // BI-V100 warp = 64; NVIDIA warp = 32.
   // Qwen3.5 head_dim=256, which is 256/64=4 warps — perfectly aligned.
+#if defined(USE_ILU)
   constexpr int64_t kHeadDim = ilu_hw::kQwen35HeadDim;
   constexpr int64_t kWarpAlign = ilu_hw::kWarpSize;
+#else
+  constexpr int64_t kHeadDim = 256;   // Qwen3.5 default
+  constexpr int64_t kWarpAlign = 32;  // NVIDIA default warp size
+#endif
   const int64_t padded = align_up(kHeadDim, kWarpAlign);
   if (padded != kHeadDim) {
     LOG(WARNING) << "[LayerwiseSplit] head_dim=" << kHeadDim

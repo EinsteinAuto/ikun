@@ -24,6 +24,7 @@ limitations under the License.
 
 namespace xllm {
 
+#if defined(USE_ILU)
 /// Master-side entry point: compute and log the layerwise layout.
 ///
 /// For Qwen3.5 (Qwen3.6-35B-A3B):
@@ -39,5 +40,6 @@ std::optional<IluLayerwiseLayout> master_compute_layerwise_layout(
     int64_t head_dim,
     int64_t max_tokens,
     int dtype_enum);
+#endif  // defined(USE_ILU)
 
 }  // namespace xllm

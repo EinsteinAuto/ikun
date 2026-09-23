@@ -8,7 +8,7 @@
    Scope:    Qwen3.5 data-parallel support in project_6.
 ==============================================================================*/
 
-#include "core/runtime/py_attention_metadata.h"
+#include "runtime/py_attention_metadata.h"
 
 #include <pybind11/stl.h>
 #include <torch/extension.h>

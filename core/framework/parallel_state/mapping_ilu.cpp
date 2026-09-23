@@ -41,6 +41,8 @@ limitations under the License.
 
 #include "framework/parallel_state/mapping_ilu.h"
 
+#if defined(USE_ILU)
+
 #include <glog/logging.h>
 
 #include <algorithm>
@@ -108,3 +110,5 @@ IluLayerwiseLayout compute_ilu_layerwise_layout(
 }
 
 }  // namespace xllm
+
+#endif  // defined(USE_ILU)

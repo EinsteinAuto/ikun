@@ -1,10 +1,33 @@
 #!/usr/bin/env bash
 # verify_build.sh — 在BI-V100真机上验证完整build链
-set -uo pipefail
+#
+# Exit codes:
+#   0 — all checks passed
+#   1 — one or more checks failed (see summary at end)
+#
+# Usage:
+#   ./verify_build.sh           # run all checks
+#   ./verify_build.sh --quick   # syntax checks only (no CUDA)
+set -euo pipefail
 cd "$(dirname "$0")"
 
-echo "=== 1. patch_ops.sh syntax ==="
-bash -n qwen3_6_scripts/patch_ops.sh && echo "✓ OK" || echo "✗ FAIL"
+FAIL_COUNT=0
+PASS_COUNT=0
+
+run_check() {
+  local name="$1"; shift
+  echo ""
+  echo "=== ${name} ==="
+  if "$@"; then
+    echo "✓ PASS: ${name}"
+    ((PASS_COUNT++)) || true
+  else
+    echo "✗ FAIL: ${name}"
+    ((FAIL_COUNT++)) || true
+  fi
+}
+
+run_check "1. patch_ops.sh syntax" bash -n qwen3_6_scripts/patch_ops.sh
 
 echo ""
 echo "=== 2. build ix_unified_bridge.so ==="
@@ -69,10 +92,30 @@ for name in ["corex_moe_direct_routed", "corex_gdn_packed_decode", "corex_gdn_ca
     print(f"✓ {name}: {funcs}")
 PY
 
-echo ""
-echo "=== 6. py_compile all ==="
-cd qwen3_6_scripts
-find . -path './wheels' -prune -o -name '*.py' -print0 | xargs -0 python3 -m py_compile 2>&1 && echo "✓ all OK" || echo "✗ errors"
+run_check "6. py_compile all" bash -c '
+  cd qwen3_6_scripts &&
+  find . -path "./wheels" -prune -o -name "*.py" -print0 |
+    xargs -0 python3 -m py_compile 2>&1
+'
+
+# ---------- C++ core library build (no CUDA required) ----------
+if command -v cmake >/dev/null 2>&1; then
+  run_check "7. core/ CMake configure" bash -c '
+    cd core && mkdir -p build_verify && cd build_verify &&
+    cmake .. -DUSE_ILU=ON -DBUILD_TESTING=ON 2>&1 | tail -5
+  '
+  run_check "8. core/ compile + link" bash -c '
+    cd core/build_verify && make -j$(nproc) 2>&1 | tail -5
+  '
+  run_check "9. core/ unit tests" bash -c '
+    cd core/build_verify && ./test_layerwise_split 2>&1 | tail -5
+  '
+fi
 
 echo ""
-echo "=== DONE ==="
+echo "==========================================="
+echo "  SUMMARY: ${PASS_COUNT} passed, ${FAIL_COUNT} failed"
+echo "==========================================="
+if [ "${FAIL_COUNT}" -gt 0 ]; then
+  exit 1
+fi

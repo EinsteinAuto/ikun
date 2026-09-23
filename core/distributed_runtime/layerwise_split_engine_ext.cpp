@@ -28,6 +28,9 @@ limitations under the License.
 
 #include "distributed_runtime/layerwise_split_engine_ext.h"
 
+#if defined(USE_ILU)
+
+#include <gflags/gflags.h>
 #include <glog/logging.h>
 
 #include <memory>
@@ -37,7 +40,6 @@ limitations under the License.
 #include "framework/kv_cache/layerwise_split_layout.h"
 #include "framework/parallel_state/mapping_ilu.h"
 
-// The flag is declared in parallel_config_layerwise.h / .cpp (sub-task 7).
 DECLARE_bool(enable_layerwise_split);
 
 namespace xllm {
@@ -61,3 +63,5 @@ std::optional<IluLayerwiseLayout> maybe_compute_layerwise_layout(
 }
 
 }  // namespace xllm
+
+#endif  // defined(USE_ILU)

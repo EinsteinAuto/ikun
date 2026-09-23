@@ -8,3 +8,10 @@ __pycache__/
 ex_engine/build/
 ex_engine/*/build/
 qwen3_6_scripts/*/build/
+-e 
+# Build artifacts
+core/build*/
+*.o
+*.a
+*.so
+__pycache__/

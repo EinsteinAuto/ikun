@@ -8,13 +8,9 @@
 DEFINE_int32(dp_size, 1, "Data parallel size.");
 DEFINE_int32(ep_size, 1, "Expert parallel size for MoE model.");
 DEFINE_int32(cp_size, 1, "Context parallel size.");
-DEFINE_int32(
-    layerwise_split_size,
-    1,
-    "Layer-owner KV cache group size inside each attention TP group. "
-    "1 disables layerwise split; values > 1 shard persistent KV by layer owner "
-    "and enable layerwise-split communication. The value must divide attention "
-    "TP size.");
+// layerwise_split_size is DEFINED in config/parallel_config_layerwise.cpp;
+// only DECLARE here to avoid duplicate gflag registration (ODR violation).
+DECLARE_int32(layerwise_split_size);
 DEFINE_int32(kv_split_size, 1, "KV-cache split width.");
 DEFINE_int64(tp_size, 1, "Tensor parallelism size.");
 DEFINE_string(communication_backend, "nccl", "Communication backend.");
