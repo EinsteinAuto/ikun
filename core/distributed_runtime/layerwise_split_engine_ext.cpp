@@ -28,6 +28,7 @@ limitations under the License.
 
 #include "distributed_runtime/layerwise_split_engine_ext.h"
 
+#include <gflags/gflags.h>
 #include <glog/logging.h>
 
 #include <memory>

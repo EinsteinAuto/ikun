@@ -28,6 +28,7 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <gflags/gflags.h>
 #include <optional>
 #include <string>
 #include <vector>
