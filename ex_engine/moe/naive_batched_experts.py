@@ -60,39 +60,38 @@ def naive_batched_moe_forward(
 
     if T == 1:
         # === Decode path (single token) ===
-        # From NaiveBatchedExperts.apply():
-        #   input = hidden_states[expert, :num, :] @ w1[expert].transpose(0, 1)
+        # Optimized: no .tolist() GPU->CPU sync, no Python per-expert loop.
+        # Instead: batch-gather weights for all top_k experts, run one
+        # large GEMV for FC1 and one bmm for FC2.
         #
-        # For decode, each expert sees exactly 1 token.
-        # expert ids are in topk_ids[0] (shape: top_k,)
-        eids = topk_ids[0].tolist()   # (top_k,) → CPU list, ONE sync
-        ws = topk_weights[0]          # (top_k,) stays on GPU
+        # Before: .tolist() sync + 8 separate cublas calls = ~40 kernel
+        # launches per MoE layer.
+        # After: index_select + 1 mm + 1 act + 1 bmm + 1 einsum = ~5
+        # kernel launches per MoE layer.
+        eids = topk_ids[0]                                   # (K,) stays on GPU
+        ws = topk_weights[0]                                 # (K,)
 
-        for i in range(top_k):
-            eid = eids[i]
+        # Batch gather: select all K experts at once
+        w13_sel = torch.index_select(w13, 0, eids)           # (K, 2*I, H)
+        w2_sel = torch.index_select(w2, 0, eids)             # (K, H, I)
 
-            # FC1: (1, H) @ (H, 2*I) → (1, 2*I)
-            # w13[eid] is (2*I, H), .transpose(0, 1) is (H, 2*I) — VIEW, zero copy
-            # @ lets cublas use transB=CUBLAS_OP_T
-            gate_up = hidden_states @ w13[eid].transpose(0, 1)  # (1, 2*I)
+        # FC1: one large GEMV — (1, H) @ (H, K*2*I) -> (1, K*2*I)
+        gate_up = hidden_states @ w13_sel.reshape(-1, H).t() # (1, K*2*I)
+        gate_up = gate_up.view(top_k, -1)                    # (K, 2*I)
 
-            # Activation: silu_and_mul
-            # From upstream apply_moe_activation():
-            #   gate = input[..., :d], up = input[..., d:]
-            #   output = F.silu(gate) * up
-            if act_fn is not None:
-                act = act_fn(gate_up)     # SiluAndMul: (1, 2*I) → (1, I)
-            else:
-                gate = gate_up[..., :I]
-                up = gate_up[..., I:]
-                act = F.silu(gate) * up   # (1, I)
+        # Activation
+        if act_fn is not None:
+            act = act_fn(gate_up)                             # (K, I)
+        else:
+            gate = gate_up[..., :I]
+            up = gate_up[..., I:]
+            act = F.silu(gate) * up                           # (K, I)
 
-            # FC2: (1, I) @ (I, H) → (1, H)
-            # w2[eid] is (H, I), .transpose(0, 1) is (I, H) — VIEW, zero copy
-            expert_out = act @ w2[eid].transpose(0, 1)  # (1, H)
+        # FC2: batched GEMV — (K, H, I) @ (K, I, 1) -> (K, H)
+        expert_out = torch.bmm(w2_sel, act.unsqueeze(-1)).squeeze(-1)
 
-            # Weighted accumulate
-            out += ws[i] * expert_out
+        # Weighted combine — fused multiply+sum
+        out = torch.einsum('k,kh->h', ws, expert_out).unsqueeze(0)  # (1, H)
 
     else:
         # === Prefill path (multiple tokens) ===
