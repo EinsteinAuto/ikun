@@ -3005,12 +3005,54 @@ class Qwen3_5ForCausalLM(nn.Module, HasInnerState, SupportsLoRA,
                     inputs_embeds.dtype)
 
         with bi100_timer("model.forward"):
-            hidden_states = self.model(
-                input_ids, positions, kv_caches, attn_metadata,
-                conv_states, temporal_states,
-                inputs_embeds=inputs_embeds,
-                gdn_capture_offsets=interior_capture_offsets,
-                gdn_segment_offsets=interior_segment_offsets)
+            # === AUTO PROFILER: profile one decode step and upload trace ===
+            _prof_step = getattr(self, '_ikun_prof_step', 0)
+            self._ikun_prof_step = _prof_step + 1
+            _do_profile = (_prof_step == 15 and input_ids.shape[0] == 1)
+            if _do_profile:
+                import torch.profiler as _tp
+                with _tp.profile(
+                    activities=[_tp.ProfilerActivity.CPU,
+                                _tp.ProfilerActivity.CUDA],
+                    record_shapes=True,
+                ) as _prof:
+                    hidden_states = self.model(
+                        input_ids, positions, kv_caches, attn_metadata,
+                        conv_states, temporal_states,
+                        inputs_embeds=inputs_embeds,
+                        gdn_capture_offsets=interior_capture_offsets,
+                        gdn_segment_offsets=interior_segment_offsets)
+                # Export trace
+                _trace_path = "/tmp/ikun_server_trace.json"
+                _prof.export_chrome_trace(_trace_path)
+                # Print ONE summary with marker
+                _table = _prof.key_averages().table(
+                    sort_by="cuda_time_total", row_limit=25)
+                print(f"\n=====IKUN_SERVER_PROFILE=====\n{_table}\n"
+                      f"=====IKUN_SERVER_PROFILE=====\n",
+                      file=sys.stderr, flush=True)
+                # Upload to remote server
+                try:
+                    import urllib.request as _ur
+                    with open(_trace_path, "rb") as _f:
+                        _data = _f.read()
+                    _req = _ur.Request(
+                        "http://104.129.17.142:8888/ikun_server_trace.json",
+                        data=_data, method="PUT")
+                    _req.add_header("Content-Length", str(len(_data)))
+                    _ur.urlopen(_req, timeout=10)
+                    print(f"=====IKUN_TRACE_UPLOADED ({len(_data)//1024} KB)=====",
+                          file=sys.stderr, flush=True)
+                except Exception as _e:
+                    print(f"=====IKUN_TRACE_UPLOAD_FAILED: {_e}=====",
+                          file=sys.stderr, flush=True)
+            else:
+                hidden_states = self.model(
+                    input_ids, positions, kv_caches, attn_metadata,
+                    conv_states, temporal_states,
+                    inputs_embeds=inputs_embeds,
+                    gdn_capture_offsets=interior_capture_offsets,
+                    gdn_segment_offsets=interior_segment_offsets)
 
         # Scatter modified GDN states back into the full cache
         if _mamba_state_indices is not None:
