@@ -26,6 +26,9 @@ limitations under the License.
 
 #include "distributed_runtime/layerwise_split_master.h"
 
+#if defined(USE_ILU)
+
+#include <gflags/gflags.h>
 #include <glog/logging.h>
 
 #include <optional>
@@ -89,3 +92,5 @@ std::optional<IluLayerwiseLayout> master_compute_layerwise_layout(
 }
 
 }  // namespace xllm
+
+#endif  // defined(USE_ILU)

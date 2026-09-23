@@ -22,6 +22,11 @@ limitations under the License.
 
 namespace xllm {
 
+#if defined(USE_ILU)
+// ILU-specific device mapping — only available when building with -DUSE_ILU.
+// On CUDA/NPU/MLU builds these symbols are absent, and the engine falls back
+// to the generic LayerwiseSplitLayout (round-robin by layer_id).
+
 /// Topology kind for Iluvatar BI-V100 device mapping.
 /// Verified via `ixsmi topo -m` on actual hardware.
 enum class IluTopoKind : int8_t {
@@ -53,5 +58,7 @@ IluLayerwiseLayout compute_ilu_layerwise_layout(
     const std::vector<int64_t>& per_layer_kv_heads,
     int32_t world_size,
     IluTopoKind topo_kind = IluTopoKind::kFlatPIX);
+
+#endif  // defined(USE_ILU)
 
 }  // namespace xllm

@@ -23,7 +23,8 @@ limitations under the License.
 
 namespace xllm {
 
-/// Called by llm_engine / speculative_engine at startup.
+#if defined(USE_ILU)
+/// Called by llm_engine / speculative_engine at startup on ILU devices.
 /// Returns a IluLayerwiseLayout if the feature is enabled, otherwise
 /// std::nullopt (fallback to uniform allocation).
 ///
@@ -34,5 +35,6 @@ std::optional<IluLayerwiseLayout> maybe_compute_layerwise_layout(
     int64_t num_layers,
     const std::vector<int64_t>& per_layer_kv_heads,
     int32_t world_size);
+#endif  // defined(USE_ILU)
 
 }  // namespace xllm

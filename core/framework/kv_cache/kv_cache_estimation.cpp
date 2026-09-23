@@ -277,10 +277,32 @@ void init_standard_counts(const ModelArgs& model_args,
   if (kv_cache_cap->linear_slot_size() > 0) {
     CHECK_GT(kv_cache_cap->cache_size_in_bytes(),
              kv_cache_cap->linear_cache_size_in_bytes())
-        << "failed to reserve linear state cache";
+        << "failed to reserve linear state cache for linear-attention layers: "
+        << "linear_cache requires "
+        << (kv_cache_cap->linear_cache_size_in_bytes() >> 20) << " MiB but "
+        << "total cache budget is only "
+        << (kv_cache_cap->cache_size_in_bytes() >> 20) << " MiB. "
+        << "max_seqs_per_batch (" << options.max_seqs_per_batch
+        << ") is too large. Please reduce max_seqs_per_batch to less than "
+        << (kv_cache_cap->num_linear_attention_layers() > 0 &&
+                    kv_cache_cap->linear_slot_size() > 0
+                ? kv_cache_cap->cache_size_in_bytes() /
+                      (kv_cache_cap->num_linear_attention_layers() *
+                       kv_cache_cap->linear_slot_size()) -
+                  kPaddingLinearStateBlocks
+                : 0)
+        << " [linear_attn_layers="
+        << kv_cache_cap->num_linear_attention_layers()
+        << ", linear_slot_size=" << kv_cache_cap->linear_slot_size()
+        << ", linear_state_blocks="
+        << kv_cache_cap->num_linear_state_blocks() << "]";
   }
   CHECK_GT(available_full_cache_size_in_bytes, 0)
-      << "no memory left for full-attention kv cache";
+      << "no memory left for full-attention kv cache after reserving linear "
+         "state cache ("
+      << (kv_cache_cap->linear_cache_size_in_bytes() >> 20)
+      << " MiB for " << kv_cache_cap->num_linear_attention_layers()
+      << " linear-attention layers)";
   if (options.layerwise_split_size > 1) {
     kv_cache_cap->n_blocks(
         layerwise_split_block_count(model_args,

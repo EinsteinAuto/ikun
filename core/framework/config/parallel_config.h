@@ -3,10 +3,25 @@
 
 #pragma once
 
+#include <gflags/gflags.h>
+
 #include <cstdint>
 #include <string>
 
 #include "common/macros.h"
+
+// Forward-declare gflags consumed by ParallelConfig::from_flags().
+// DEFINEs live in:
+//   framework/config/parallel_config.cpp  — dp_size, ep_size, cp_size, etc.
+//   config/parallel_config_layerwise.cpp  — layerwise_split_size, enable_layerwise_split
+DECLARE_int32(dp_size);
+DECLARE_int32(ep_size);
+DECLARE_int32(cp_size);
+DECLARE_int32(layerwise_split_size);
+DECLARE_int32(kv_split_size);
+DECLARE_int64(tp_size);
+DECLARE_string(communication_backend);
+DECLARE_bool(enable_multi_stream_parallel);
 
 namespace xllm {
 

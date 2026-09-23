@@ -78,14 +78,16 @@ LayerwiseKVMemoryEstimate estimate_layerwise_kv_memory(
 
   const int64_t elem_bytes = dtype_bytes(dtype_enum);
 
-  // BI-V100 warp = 64: pad head_dim to the next multiple of 64
-  // so each warp's contiguous load spans an aligned region.
-  // Qwen3.5 head_dim=256 → 256/64=4 warps, already aligned.
+  // Pad head_dim to the device's warp size so each warp's contiguous load
+  // spans an aligned region.
+  // BI-V100 warp = 64: Qwen3.5 head_dim=256 → 256/64=4 warps, aligned.
+  // NVIDIA  warp = 32: head_dim=256 → 256/32=8, also aligned.
 #if defined(USE_ILU)
-  const int64_t padded_head_dim = align_up(head_dim, ilu_hw::kWarpSize);
+  constexpr int64_t kDeviceWarpSize = ilu_hw::kWarpSize;  // 64
 #else
-  const int64_t padded_head_dim = head_dim;
+  constexpr int64_t kDeviceWarpSize = 32;  // NVIDIA default
 #endif
+  const int64_t padded_head_dim = align_up(head_dim, kDeviceWarpSize);
 
   // Per-rank KV bytes: sum over layers of (2 * heads * n_blocks *
   // block_size * padded_head_dim * elem_bytes).  Factor 2 = K + V.
