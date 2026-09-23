@@ -83,6 +83,14 @@ ENV_KERNEL_MAP = {
     "BI100_MOE_COREX_DIRECT_ROUTED": "corex_moe_direct_routed",
     "BI100_MOE_COREX_TOPK_SOFTMAX": "corex_moe_topk_softmax",
     "BI100_MOE_COREX_INDEX_COMBINE": "corex_moe_index_combine",
+    "BI100_MOE_BATCHED_GEMM": "corex_batched_gemm",
+}
+
+# SOs that are always enabled when loadable (no env-gate toggle).
+# Section 3 reports them separately to flag the operational risk of
+# having no runtime disable switch.
+ALWAYS_ENABLED_SO = {
+    "corex_gdn_chunk_recurrent",
 }
 
 
@@ -154,6 +162,17 @@ def verify_env_kernel_dispatch():
         elif not enabled:
             check(f"{env_var}={env_val} → {module_name}",
                   True, f"disabled (available={available})")
+
+    # SOs with no env-gate: always active when loadable.
+    # Report availability so operators know they cannot be toggled off.
+    for module_name in sorted(ALWAYS_ENABLED_SO):
+        try:
+            mod = importlib.import_module(f"vllm.{module_name}")
+            available = mod is not None
+        except Exception:
+            available = False
+        check(f"(always-on) {module_name}",
+              True, f"available={available} — no env toggle")
 
 
 def verify_protocol():

@@ -305,15 +305,21 @@ std::vector<bool> resolve_indexer_cache_enabled_layers(
 }
 
 // Upstream: build_layer_cache_owned (lines 563-574)
+// A layer "owns" its KV cache shard when the layerwise-split layout assigns
+// it to this rank.  Linear-attention layers have no KV cache at all, so they
+// must return false — not true — to avoid inflating owned_bytes.
+// (Previously the negation returned true for linear layers, which was
+// numerically harmless because layer_bytes[linear_layer]==0, but semantically
+// wrong and would break if linear-state layerwise splitting is added.)
 std::vector<bool> build_layer_cache_owned(const ModelArgs& model_args,
                                           const LayerwiseSplitLayout& layout,
                                           int64_t num_layers) {
   std::vector<bool> layer_cache_owned;
   layer_cache_owned.reserve(static_cast<size_t>(num_layers));
   for (int64_t layer_id = 0; layer_id < num_layers; ++layer_id) {
-    layer_cache_owned.emplace_back(
-        !is_full_attention_layer(model_args, layer_id) ||
-        layout.owns(layer_id));
+    const bool is_full_attn = is_full_attention_layer(model_args, layer_id);
+    // Linear attention layers have no KV cache to split.
+    layer_cache_owned.emplace_back(is_full_attn && layout.owns(layer_id));
   }
   return layer_cache_owned;
 }

@@ -239,10 +239,12 @@ TEST(LayerwiseSplitKV, TC05_WorkerLayerCacheOwned) {
   ASSERT_EQ(static_cast<int64_t>(owned_r0.size()), num_layers);
   ASSERT_EQ(static_cast<int64_t>(owned_r1.size()), num_layers);
 
-  // Linear-attention layers always owned on both ranks.
+  // Linear-attention layers have no KV cache, so they are NOT "owned"
+  // in the cache-splitting sense — they always return false.
+  // (Previously they returned true due to a negation bug.)
   for (int64_t i = 1; i < num_layers; i += 2) {
-    EXPECT_TRUE(owned_r0[static_cast<size_t>(i)]);
-    EXPECT_TRUE(owned_r1[static_cast<size_t>(i)]);
+    EXPECT_FALSE(owned_r0[static_cast<size_t>(i)]);
+    EXPECT_FALSE(owned_r1[static_cast<size_t>(i)]);
   }
 
   // Full-attention layers: rank 0 owns all (even layer_ids % 2 == 0),
@@ -326,11 +328,11 @@ TEST(LayerwiseSplitKV, TC08_BuildLayerCacheOwned) {
   auto owned = build_layer_cache_owned(args, layout, 8);
   ASSERT_EQ(owned.size(), 8u);
 
-  // Linear-attention layers (indices 1,3,5,7) → always true.
-  EXPECT_TRUE(owned[1]);
-  EXPECT_TRUE(owned[3]);
-  EXPECT_TRUE(owned[5]);
-  EXPECT_TRUE(owned[7]);
+  // Linear-attention layers (indices 1,3,5,7) → false (no KV cache to split).
+  EXPECT_FALSE(owned[1]);
+  EXPECT_FALSE(owned[3]);
+  EXPECT_FALSE(owned[5]);
+  EXPECT_FALSE(owned[7]);
 
   // Full-attention layers (indices 0,2,4,6):
   // Upstream uses absolute layer_id % group_size, NOT full_attn_idx.

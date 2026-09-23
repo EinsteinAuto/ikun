@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD 17)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GLOG REQUIRED IMPORTED_TARGET libglog)
+find_package(gflags REQUIRED)
 find_package(GTest QUIET)
 
 # ---------- layerwise split KV cache library ----------

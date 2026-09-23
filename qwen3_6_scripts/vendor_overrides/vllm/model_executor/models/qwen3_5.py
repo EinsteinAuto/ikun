@@ -2391,16 +2391,19 @@ class Qwen3_5MoeSparseBlock(nn.Module):
                 # Step 4: grouped GEMM w13 (gate_proj + up_proj)
                 gemm1_out = _gemm_grouped.moe_group_gemm(
                     sorted_hidden, w13, expert_counts_t)  # (T*topk, 2*I)
-                gate, up = gemm1_out.chunk(2, dim=-1)
-                act_out = F.silu(gate) * up  # (T*topk, I)
+                if _USE_FUSED_MOE_ACTIVATION:
+                    act_out = self.act_fn(gemm1_out)       # (T*topk, I)
+                else:
+                    gate, up = gemm1_out.chunk(2, dim=-1)
+                    act_out = F.silu(gate) * up            # (T*topk, I)
 
                 # Step 6: grouped GEMM w2 (down_proj)
                 gemm2_out = _gemm_grouped.moe_group_gemm(
                     act_out, w2, expert_counts_t)  # (T*topk, H)
 
                 # Step 7: weighted combine back to token order
-                flat_weights = sorted_weights.unsqueeze(-1)  # (T*topk, 1)
-                weighted = (gemm2_out * flat_weights).to(out.dtype)
+                combine_weights = sorted_weights.unsqueeze(-1)  # (T*topk, 1)
+                weighted = (gemm2_out * combine_weights).to(out.dtype)
                 out.index_add_(0, sorted_tok_ids, weighted)
             else:
                 # Fallback: per-expert F.linear loop
@@ -2413,8 +2416,11 @@ class Qwen3_5MoeSparseBlock(nn.Module):
                     tok_ids = sorted_tok_ids[start:end]
                     tokens = hidden_states[tok_ids]                # (n, H)
                     gate_up = _fast_linear(tokens, w13[eid])           # (n, 2*I)
-                    gate, up = gate_up.chunk(2, dim=-1)
-                    act = F.silu(gate) * up                        # (n, I)
+                    if _USE_FUSED_MOE_ACTIVATION:
+                        act = self.act_fn(gate_up)                 # (n, I)
+                    else:
+                        gate, up = gate_up.chunk(2, dim=-1)
+                        act = F.silu(gate) * up                    # (n, I)
                     expert_out = _fast_linear(act, w2[eid])            # (n, H)
                     weights = sorted_weights[start:end].unsqueeze(-1)
                     out.index_add_(0, tok_ids, (expert_out * weights).to(out.dtype))

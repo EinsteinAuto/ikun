@@ -60,27 +60,39 @@ def main():
         total_fail += 1
     
     # 3. Prebuilt .so: check if install would work
-    print("\n=== 3. Prebuilt .so (16 modules) ===")
+    print(f"\n=== 3. Prebuilt .so ({len(PREBUILT)} modules) ===")
     prebuilt_dir = "qwen3_6_scripts/prebuilt/corex-3.2.3-ivcore10"
     for name in PREBUILT:
         src = os.path.join(prebuilt_dir, f"{name}.so")
-        if os.path.exists(src):
-            size = os.path.getsize(src)
-            # Check if installed in system vllm
-            if sys_vllm:
-                dst = os.path.join(sys_vllm, f"{name}.so")
-                if os.path.exists(dst):
-                    print(f"  [INSTALLED] {name} ({size:,}B)")
-                    total_ok += 1
-                else:
-                    print(f"  [PREBUILT]  {name} ({size:,}B) → needs install to {dst}")
-                    total_ok += 1  # prebuilt exists, will be installed by patch_ops
-            else:
-                print(f"  [PREBUILT]  {name} ({size:,}B)")
-                total_ok += 1
-        else:
+        if not os.path.exists(src):
             print(f"  [MISS] {name}: prebuilt not found")
             total_fail += 1
+            continue
+        size = os.path.getsize(src)
+        # ELF magic validation: first 4 bytes must be \x7fELF
+        try:
+            with open(src, 'rb') as f:
+                magic = f.read(4)
+            if magic != b'\x7fELF':
+                print(f"  [CORRUPT] {name} ({size:,}B) — not a valid ELF (magic={magic!r})")
+                total_fail += 1
+                continue
+        except Exception as e:
+            print(f"  [ERROR] {name}: cannot read — {e}")
+            total_fail += 1
+            continue
+        # Check if installed in system vllm
+        if sys_vllm:
+            dst = os.path.join(sys_vllm, f"{name}.so")
+            if os.path.exists(dst):
+                print(f"  [INSTALLED] {name} ({size:,}B)")
+                total_ok += 1
+            else:
+                print(f"  [PREBUILT]  {name} ({size:,}B) → needs install to {dst}")
+                total_ok += 1  # prebuilt exists, will be installed by patch_ops
+        else:
+            print(f"  [PREBUILT]  {name} ({size:,}B)")
+            total_ok += 1
     
     # 4. Install prebuilt to system vllm (DRY RUN)
     if sys_vllm:

@@ -276,16 +276,16 @@ if __name__ == "__main__":
 
     t0 = time.time()
 
-    print("[1/5] xllm_norm")
+    print("[1/6] xllm_norm")
     test_norm()
 
-    print("[2/5] xllm_activation")
+    print("[2/6] xllm_activation")
     test_activation()
 
-    print("[3/5] xllm_rope")
+    print("[3/6] xllm_rope")
     test_rope()
 
-    print("[4/5] xllm_cache")
+    print("[4/6] xllm_cache")
     test_cache()
 
     print("[5/6] xllm_moe")
