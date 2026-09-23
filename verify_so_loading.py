@@ -214,17 +214,27 @@ def main():
         from vllm.bi100_env import env_bool
 
         flags = {
+            # corex kernel flags (env-gated, each has a .so)
             "BI100_GDN_COREX_CAUSAL_CONV": True,
             "BI100_GDN_COREX_GATED_NORM": True,
             "BI100_GDN_COREX_BETA_DECAY": True,
             "BI100_GDN_COREX_QK_MAP": True,
             "BI100_GDN_COREX_PACKED_DECODE": False,
+            "BI100_GDN_COMBINED_QK_NORM": True,
             "BI100_ATTN_COREX_HEAD_RMS_NORM": True,
             "BI100_MOE_COREX_EXACT_REDUCE": True,
             "BI100_MOE_COREX_WEIGHT_GATHER": True,
             "BI100_MOE_COREX_DIRECT_ROUTED": False,
             "BI100_MOE_COREX_TOPK_SOFTMAX": True,
             "BI100_MOE_COREX_INDEX_COMBINE": True,
+            "BI100_MOE_BATCHED_GEMM": True,
+            # xllm kernel flags (loaded from base image .so)
+            "BI100_XLLM_ACTIVATION": True,
+            "BI100_XLLM_CACHE": True,
+            "BI100_XLLM_FUSED_QKNORM_ROPE": True,
+            "BI100_XLLM_NORM": True,
+            "BI100_XLLM_ROPE": True,
+            "BI100_MOE_XLLM": True,
         }
 
         for env_name, default in flags.items():
