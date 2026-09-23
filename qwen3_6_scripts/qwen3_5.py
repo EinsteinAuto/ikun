@@ -2218,16 +2218,24 @@ class Qwen3_5MoeSparseBlock(nn.Module):
                     and eids.numel() == 8)
 
                 if use_corex_direct:
-                    eids_i64 = eids.to(torch.int64)
-                    gate_up = _corex_moe_direct_routed.w13(
-                        hidden_states, w13, eids_i64)
-                    if _USE_FUSED_MOE_ACTIVATION:
-                        act = self.act_fn(gate_up)
-                    else:
-                        gate, up = gate_up.chunk(2, dim=-1)
-                        act = (F.silu(gate) * up).contiguous()
-                    out = _corex_moe_direct_routed.w2_reduce(
-                        act, w2, eids_i64, ws)
+                    if not hasattr(self, '_direct_routed_logged'):
+                        self._direct_routed_logged = True
+                        print("=============corex_moe_direct_routed ENABLED: w13={} w2={} eids={} ws_dtype={}===========".format(
+                            tuple(w13.shape), tuple(w2.shape), tuple(eids.shape), ws.dtype))
+                    try:
+                        eids_i64 = eids.to(torch.int64)
+                        gate_up = _corex_moe_direct_routed.w13(
+                            hidden_states, w13, eids_i64)
+                        if _USE_FUSED_MOE_ACTIVATION:
+                            act = self.act_fn(gate_up)
+                        else:
+                            gate, up = gate_up.chunk(2, dim=-1)
+                            act = (F.silu(gate) * up).contiguous()
+                        out = _corex_moe_direct_routed.w2_reduce(
+                            act, w2, eids_i64, ws)
+                    except Exception as e:
+                        print("=============corex_moe_direct_routed FAILED: {}===========".format(e))
+                        raise
                 elif (_USE_COREX_BATCHED_GEMM
                         and hidden_states.dtype == torch.float16
                         and w13.dtype == torch.float16
