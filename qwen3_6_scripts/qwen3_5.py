@@ -2204,29 +2204,52 @@ class Qwen3_5MoeSparseBlock(nn.Module):
             else:
                 K = eids.shape[0]
                 H = hidden_states.shape[-1]
-                w13_sel = w13[eids]
-                w2_sel = w2[eids]
 
-                gate_up = _fast_linear(
-                    hidden_states,
-                    w13_sel.reshape(-1, H),
-                )
-                gate_up = gate_up.view(K, -1)
+                use_corex_direct = (
+                    _USE_COREX_MOE_DIRECT_ROUTED
+                    and hidden_states.dtype == torch.float16
+                    and w13.dtype == torch.float16
+                    and w2.dtype == torch.float16
+                    and hidden_states.is_cuda and w13.is_cuda
+                    and hidden_states.is_contiguous()
+                    and w13.is_contiguous() and w2.is_contiguous()
+                    and w13.shape == (256, 256, 2048)
+                    and w2.shape == (256, 2048, 128)
+                    and eids.numel() == 8)
 
-                if _USE_FUSED_MOE_ACTIVATION:
-                    act = self.act_fn(gate_up)
+                if use_corex_direct:
+                    eids_i64 = eids.to(torch.int64)
+                    gate_up = _corex_moe_direct_routed.w13(
+                        hidden_states, w13, eids_i64)
+                    if _USE_FUSED_MOE_ACTIVATION:
+                        act = self.act_fn(gate_up)
+                    else:
+                        gate, up = gate_up.chunk(2, dim=-1)
+                        act = (F.silu(gate) * up).contiguous()
+                    out = _corex_moe_direct_routed.w2_reduce(
+                        act, w2, eids_i64, ws)
+                elif (_USE_COREX_BATCHED_GEMM
+                        and hidden_states.dtype == torch.float16
+                        and w13.dtype == torch.float16
+                        and w2.dtype == torch.float16):
+                    out = _corex_batched_gemm.moe_decode_fused(
+                        hidden_states, w13[eids], w2[eids], ws)
                 else:
-                    gate, up = gate_up.chunk(2, dim=-1)
-                    act = F.silu(gate) * up
-
-                # Fused FC2 + weighted combine:
-                # sum_k ws[k]*(w2[k] @ act[k]) = W_cat @ act_weighted
-                # where W_cat = (H, K*I), act_weighted = (K*I,)
-                act_weighted = (act * ws.unsqueeze(-1)).reshape(1, -1)
-                out = _fast_linear(
-                    act_weighted,
-                    w2_sel.permute(1, 0, 2).reshape(H, -1),
-                ).to(hidden_states.dtype)
+                    w13_sel = w13[eids]
+                    w2_sel = w2[eids]
+                    gate_up = _fast_linear(
+                        hidden_states, w13_sel.reshape(-1, H))
+                    gate_up = gate_up.view(K, -1)
+                    if _USE_FUSED_MOE_ACTIVATION:
+                        act = self.act_fn(gate_up)
+                    else:
+                        gate, up = gate_up.chunk(2, dim=-1)
+                        act = F.silu(gate) * up
+                    act_weighted = (act * ws.unsqueeze(-1)).reshape(1, -1)
+                    out = _fast_linear(
+                        act_weighted,
+                        w2_sel.permute(1, 0, 2).reshape(H, -1),
+                    ).to(hidden_states.dtype)
         else:
             # General path (prefill / multi-seq): group assignments once.
             out = torch.zeros_like(hidden_states)
