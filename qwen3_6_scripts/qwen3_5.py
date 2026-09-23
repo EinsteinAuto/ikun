@@ -3022,30 +3022,49 @@ class Qwen3_5ForCausalLM(nn.Module, HasInnerState, SupportsLoRA,
                         inputs_embeds=inputs_embeds,
                         gdn_capture_offsets=interior_capture_offsets,
                         gdn_segment_offsets=interior_segment_offsets)
-                # Export trace
-                _trace_path = "/tmp/ikun_server_trace.json"
-                _prof.export_chrome_trace(_trace_path)
+                # Export trace — use tempfile to avoid path issues in TP workers
+                import tempfile as _tf, io as _io
+                _trace_fd, _trace_path = _tf.mkstemp(
+                    suffix=".json", prefix="ikun_trace_")
+                os.close(_trace_fd)
+                try:
+                    _prof.export_chrome_trace(_trace_path)
+                    _trace_size = os.path.getsize(_trace_path)
+                except Exception as _export_err:
+                    print(f"=====IKUN_TRACE_EXPORT_FAILED: {_export_err}=====",
+                          file=sys.stderr, flush=True)
+                    _trace_path = None
+                    _trace_size = 0
                 # Print ONE summary with marker
                 _table = _prof.key_averages().table(
                     sort_by="cuda_time_total", row_limit=25)
                 print(f"\n=====IKUN_SERVER_PROFILE=====\n{_table}\n"
                       f"=====IKUN_SERVER_PROFILE=====\n",
                       file=sys.stderr, flush=True)
-                # Upload to remote server
-                try:
-                    import urllib.request as _ur
-                    with open(_trace_path, "rb") as _f:
-                        _data = _f.read()
-                    _req = _ur.Request(
-                        "http://104.129.17.142:8888/ikun_server_trace.json",
-                        data=_data, method="PUT")
-                    _req.add_header("Content-Length", str(len(_data)))
-                    _ur.urlopen(_req, timeout=10)
-                    print(f"=====IKUN_TRACE_UPLOADED ({len(_data)//1024} KB)=====",
-                          file=sys.stderr, flush=True)
-                except Exception as _e:
-                    print(f"=====IKUN_TRACE_UPLOAD_FAILED: {_e}=====",
-                          file=sys.stderr, flush=True)
+                # Upload trace to remote server
+                if _trace_path and _trace_size > 0:
+                    try:
+                        import urllib.request as _ur
+                        with open(_trace_path, "rb") as _f:
+                            _data = _f.read()
+                        _req = _ur.Request(
+                            "http://104.129.17.142:8888/ikun_server_trace.json",
+                            data=_data, method="PUT")
+                        _req.add_header("Content-Length", str(len(_data)))
+                        _ur.urlopen(_req, timeout=30)
+                        print(f"=====IKUN_TRACE_UPLOADED ({len(_data)//1024} KB)=====",
+                              file=sys.stderr, flush=True)
+                    except Exception as _e:
+                        print(f"=====IKUN_TRACE_UPLOAD_FAILED: {_e}=====",
+                              file=sys.stderr, flush=True)
+                        # Also save locally as fallback
+                        try:
+                            import shutil
+                            shutil.copy2(_trace_path, "/home/dylan/0922/ikun/ikun_server_trace.json")
+                            print("=====IKUN_TRACE_SAVED to /home/dylan/0922/ikun/ikun_server_trace.json=====",
+                                  file=sys.stderr, flush=True)
+                        except Exception:
+                            pass
             else:
                 hidden_states = self.model(
                     input_ids, positions, kv_caches, attn_metadata,
