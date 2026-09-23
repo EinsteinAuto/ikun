@@ -2226,7 +2226,7 @@ class Qwen3_5MoeSparseBlock(nn.Module):
                 act_weighted = (act * ws.unsqueeze(-1)).reshape(1, -1)
                 out = _fast_linear(
                     act_weighted,
-                    w2_sel.transpose(1, 2).reshape(-1, H),
+                    w2_sel.permute(1, 0, 2).reshape(H, -1),
                 ).to(hidden_states.dtype)
             else:
                 # --- TP mode: all 8 experts are local ---
@@ -2315,7 +2315,7 @@ class Qwen3_5MoeSparseBlock(nn.Module):
                 act_weighted = (act * ws.unsqueeze(-1)).reshape(1, -1)
                 out = _fast_linear(
                     act_weighted,
-                    w2_sel.transpose(1, 2).reshape(-1, H),
+                    w2_sel.permute(1, 0, 2).reshape(H, -1),
                 ).to(hidden_states.dtype)
         else:
             # General path (prefill / multi-seq): group assignments once.
