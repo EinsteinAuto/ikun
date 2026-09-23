@@ -2293,6 +2293,7 @@ class Qwen3_5MoeSparseBlock(nn.Module):
                     w13_sel = w13[eids]                            # (K_actual, 2*I, H)
                     w2_sel = w2[eids]                              # (K_actual, H, I)
 
+                K_actual = eids.numel()
                 H = hidden_states.shape[-1]
 
                 # FC1: single large GEMM via F.linear

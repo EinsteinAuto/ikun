@@ -562,7 +562,20 @@ build_stage "deploying remaining vendor_overrides files"
 done
 
 build_stage "compiling submission Python sources"
-find . -path './wheels' -prune -o -name '*.py' -print0 | xargs -0 python3 -m py_compile
+if ! find . -path './wheels' -prune -o -name '*.py' -print0 \
+     | xargs -0 python3 -m py_compile 2>/tmp/_pyc_err.log; then
+  echo ""
+  echo "[FATAL] py_compile failed for one or more submission .py files."
+  echo "This compile check runs on every file in qwen3_6_scripts/."
+  echo "A common cause of failure here is a stale .pyc from a previous"
+  echo "build that references a renamed or deleted module, or a syntax"
+  echo "error introduced by a bad merge."
+  echo "Fix by clearing all __pycache__ directories and retrying:"
+  echo "  find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null"
+  echo ""
+  cat /tmp/_pyc_err.log
+  exit 1
+fi
 build_stage "patch script completed"
 build_stage "installing ix_fused_moe 7-step pipeline and ex_engine"
 cp ./ix_fused_moe.py "${VLLM_ROOT}/model_executor/models/ix_fused_moe.py"

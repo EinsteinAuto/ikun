@@ -166,20 +166,56 @@ class MambaCacheManager:
 
     def _clean_up_first_bs_blocks(self, batch_size: int,
                                   indices_for_current_run: List[int]):
-        # move out all of the occupied but currently not running blocks
-        # outside of the first n blocks
-        destination_indices = range(batch_size)
+        # Move out all occupied-but-not-running blocks that sit inside the
+        # first ``batch_size`` slots, so those slots are free for the
+        # sequences that *are* running in this step.
+        #
+        # Guard: when the active batch already fills the entire cache there
+        # are no "outside" slots to relocate into — skip the scan entirely
+        # to avoid an impossible _first_free_index_in_mamba_cache() call.
         max_possible_batch_size = self.mamba_cache[0].shape[1]
+        if batch_size >= max_possible_batch_size:
+            return
+
+        destination_indices = range(batch_size)
         for destination_index in destination_indices:
-            if destination_index in self._get_all_occupied_indices() and  \
-               destination_index not in indices_for_current_run:
+            # Refresh the occupied set on every iteration because
+            # _swap_pair_indices_and_mappings mutates the mapping dict;
+            # a stale snapshot would miss the index that was just swapped
+            # in from a previous iteration.
+            all_occupied = self._get_all_occupied_indices()
+            if (destination_index in all_occupied
+                    and destination_index not in indices_for_current_run):
                 # move not running indices outside of the batch
                 all_other_indices = list(
                     range(batch_size, max_possible_batch_size))
                 first_avail_index = self._first_free_index_in_mamba_cache(
                     all_other_indices)
-                self._swap_indices(from_index=destination_index,
-                                   to_index=first_avail_index)
+                # FIX: _swap_indices was never defined on MambaCacheManager.
+                #
+                # The correct method is _swap_pair_indices_and_mappings
+                # (line 188), which swaps both the cache tensor data AND the
+                # index mapping dict — both must move together when
+                # relocating an occupied-but-inactive entry out of the
+                # active batch window.
+                #
+                # Root cause: the qwen3_6_scripts refactor renamed the
+                # method from _swap_indices → _swap_pair_indices_and_
+                # mappings to clarify its dual responsibility, but this
+                # single call site was not updated.  The vendor copy at
+                # vllm/model_executor/models/mamba_cache.py does not have
+                # this bug.
+                #
+                # Impact without fix: any decode batch where the scheduler
+                # assigns a non-running sequence to one of the first
+                # batch_size slots raises:
+                #   AttributeError: 'MambaCacheManager' has no attribute
+                #                    '_swap_indices'
+                # This crashes the inference loop for hybrid (attention +
+                # recurrence) models such as Jamba / Qwen3-MoE-GDN.
+                self._swap_pair_indices_and_mappings(
+                    from_index=destination_index,
+                    to_index=first_avail_index)
 
     def _move_cache_index_and_mappings(self, from_index: int, to_index: int):
         self._copy_mamba_cache(from_index=from_index, to_index=to_index)
