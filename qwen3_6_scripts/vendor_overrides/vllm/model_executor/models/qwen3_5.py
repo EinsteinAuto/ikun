@@ -465,12 +465,17 @@ if _USE_XLLM_CACHE:
     def _xllm_reshape_and_cache(key, value, key_cache, value_cache,
                                 slot_mapping, kv_cache_dtype="auto",
                                 k_scale=1.0, v_scale=1.0):
+        if kv_cache_dtype != "auto" or k_scale != 1.0 or v_scale != 1.0:
+            return _orig_reshape_and_cache(
+                key, value, key_cache, value_cache,
+                slot_mapping, kv_cache_dtype, k_scale, v_scale)
         slot_ids = slot_mapping.flatten().to(torch.int32)
         _xllm_cache.reshape_paged_cache(slot_ids, key, value,
                                         key_cache, value_cache)
 
     _vllm_ops.reshape_and_cache = _xllm_reshape_and_cache
-    logger.info("xllm_cache PATCHED — reshape_and_cache → xllm CUDA kernel")
+    logger.info("xllm_cache PATCHED — reshape_and_cache → xllm CUDA kernel "
+                "(with dtype/scale fallback guard)")
 
 
 # --- 4. RoPE: xllm_rope ---
