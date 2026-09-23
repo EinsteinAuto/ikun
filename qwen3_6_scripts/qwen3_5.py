@@ -2094,6 +2094,12 @@ class Qwen3_5MoeSparseBlock(nn.Module):
                     router_logits.float(), self.top_k, True)
                 topk_ids = topk_ids.to(torch.int64)
                 topk_weights = topk_weights.to(hidden_states.dtype)
+                if not hasattr(self, '_corex_topk_logged'):
+                    self._corex_topk_logged = True
+                    _wsum = topk_weights[0].float().sum().item()
+                    print("=============corex_topk_softmax ENABLED (naive_batched): "
+                          "ids_dtype={} ws_dtype={} ws_sum={:.4f}==========="
+                          .format(topk_ids.dtype, topk_weights.dtype, _wsum))
             else:
                 topk_logits, topk_ids = torch.topk(
                     router_logits.float(), self.top_k, dim=-1)
@@ -2120,6 +2126,13 @@ class Qwen3_5MoeSparseBlock(nn.Module):
                 router_logits.float(), self.top_k, True)
             topk_ids = topk_ids.to(torch.int64)
             topk_weights = topk_weights.to(hidden_states.dtype)
+            if not hasattr(self, '_corex_topk_tier1_logged'):
+                self._corex_topk_tier1_logged = True
+                _wsum = topk_weights[0].float().sum().item()
+                _id_range = (topk_ids.min().item(), topk_ids.max().item())
+                print("=============corex_topk_softmax ENABLED (Tier1): "
+                      "T={} ids_range={} ws_sum={:.4f}==========="
+                      .format(hidden_states.shape[0], _id_range, _wsum))
         else:
             topk_logits, topk_ids = torch.topk(
                 router_logits.float(), self.top_k, dim=-1)     # (T, top_k)
