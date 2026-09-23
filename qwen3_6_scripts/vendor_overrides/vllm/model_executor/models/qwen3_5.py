@@ -2223,9 +2223,11 @@ class Qwen3_5MoeSparseBlock(nn.Module):
                     gate, up = gate_up.chunk(2, dim=-1)
                     act = F.silu(gate) * up
 
-                expert_out = torch.bmm(w2_sel, act.unsqueeze(-1)).squeeze(-1)
-                out = (expert_out * ws.unsqueeze(-1)).sum(
-                    0, keepdim=True).to(hidden_states.dtype)   # (1, H)
+                act_weighted = (act * ws.unsqueeze(-1)).reshape(1, -1)
+                out = _fast_linear(
+                    act_weighted,
+                    w2_sel.transpose(1, 2).reshape(-1, H),
+                ).to(hidden_states.dtype)
             else:
                 # --- TP mode: all 8 experts are local ---
                 # --- corex_moe_direct_routed: zero-copy indexed GEMM (warp64) ---
@@ -2305,22 +2307,16 @@ class Qwen3_5MoeSparseBlock(nn.Module):
                 gate_up = gate_up.view(K_actual, -1)               # (K_actual, 2*I)
 
                 if _USE_FUSED_MOE_ACTIVATION:
-                    act = self.act_fn(gate_up)                      # (K_actual, I)
+                    act = self.act_fn(gate_up)
                 else:
                     gate, up = gate_up.chunk(2, dim=-1)
                     act = F.silu(gate) * up
 
-                # FC2: bmm (K_actual, H, I) @ (K_actual, I, 1) → (K_actual, H)
-                expert_out = torch.bmm(w2_sel, act.unsqueeze(-1)).squeeze(-1)
-
-                if (_USE_COREX_MOE_EXACT_REDUCE
-                        and expert_out.dtype == torch.float16
-                        and ws.dtype == torch.float16
-                        and expert_out.shape[0] == 8):
-                    out = _corex_moe_exact_reduce.serial_float(expert_out, ws)
-                else:
-                    out = (expert_out * ws.unsqueeze(-1)).sum(
-                        0, keepdim=True).to(hidden_states.dtype)   # (1, H)
+                act_weighted = (act * ws.unsqueeze(-1)).reshape(1, -1)
+                out = _fast_linear(
+                    act_weighted,
+                    w2_sel.transpose(1, 2).reshape(-1, H),
+                ).to(hidden_states.dtype)
         else:
             # General path (prefill / multi-seq): group assignments once.
             out = torch.zeros_like(hidden_states)

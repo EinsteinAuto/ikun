@@ -2196,41 +2196,37 @@ class Qwen3_5MoeSparseBlock(nn.Module):
                     gate, up = gate_up.chunk(2, dim=-1)
                     act = F.silu(gate) * up
 
-                expert_out = torch.bmm(w2_sel, act.unsqueeze(-1)).squeeze(-1)
-                out = (expert_out * ws.unsqueeze(-1)).sum(
-                    0, keepdim=True).to(hidden_states.dtype)   # (1, H)
+                act_weighted = (act * ws.unsqueeze(-1)).reshape(1, -1)
+                out = _fast_linear(
+                    act_weighted,
+                    w2_sel.transpose(1, 2).reshape(-1, H),
+                ).to(hidden_states.dtype)
             else:
-                # --- TP mode: all 8 experts are local ---
-                # xllm warp64-safe path: gather weights → fused GEMM → combine
                 K = eids.shape[0]
                 H = hidden_states.shape[-1]
-                w13_sel = w13[eids]                                # (K, 2*I, H)
-                w2_sel = w2[eids]                                  # (K, H, I)
+                w13_sel = w13[eids]
+                w2_sel = w2[eids]
 
-                # FC1: single large GEMM via _fast_linear (ix_moe_bridge GEMV)
                 gate_up = _fast_linear(
                     hidden_states,
-                    w13_sel.reshape(-1, H),                        # (K*2*I, H)
-                )                                                  # (1, K*2*I)
-                gate_up = gate_up.view(K, -1)                      # (K, 2*I)
+                    w13_sel.reshape(-1, H),
+                )
+                gate_up = gate_up.view(K, -1)
 
                 if _USE_FUSED_MOE_ACTIVATION:
-                    act = self.act_fn(gate_up)                      # (K, I)
+                    act = self.act_fn(gate_up)
                 else:
                     gate, up = gate_up.chunk(2, dim=-1)
                     act = F.silu(gate) * up
 
-                # FC2: bmm (K, H, I) @ (K, I, 1) → (K, H)
-                expert_out = torch.bmm(w2_sel, act.unsqueeze(-1)).squeeze(-1)
-
-                # Combine: xllm fused kernel or PyTorch weighted sum
-                if _USE_XLLM_MOE:
-                    # expert_out is (K, H), need (1*K, H) for combine
-                    out = _xllm_moe.moe_combine_result(
-                        expert_out, ws.float().unsqueeze(0), 1, K) # (1, H)
-                else:
-                    out = (expert_out * ws.unsqueeze(-1)).sum(
-                        0, keepdim=True).to(hidden_states.dtype)   # (1, H)
+                # Fused FC2 + weighted combine:
+                # sum_k ws[k]*(w2[k] @ act[k]) = W_cat @ act_weighted
+                # where W_cat = (H, K*I), act_weighted = (K*I,)
+                act_weighted = (act * ws.unsqueeze(-1)).reshape(1, -1)
+                out = _fast_linear(
+                    act_weighted,
+                    w2_sel.transpose(1, 2).reshape(-1, H),
+                ).to(hidden_states.dtype)
         else:
             # General path (prefill / multi-seq): group assignments once.
             out = torch.zeros_like(hidden_states)
