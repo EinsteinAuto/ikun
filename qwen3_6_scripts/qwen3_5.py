@@ -2196,18 +2196,22 @@ class Qwen3_5MoeSparseBlock(nn.Module):
                     gate, up = gate_up.chunk(2, dim=-1)
                     act = F.silu(gate) * up
 
-                expert_out = torch.bmm(w2_sel, act.unsqueeze(-1)).squeeze(-1)
-                out = (expert_out * ws.unsqueeze(-1)).sum(
-                    0, keepdim=True).to(hidden_states.dtype)   # (1, H)
+                # Fused FC2 + weighted combine into single GEMV
+                act_w = act * ws.unsqueeze(-1)                 # (K_local, I)
+                w2_flat = w2_sel.permute(1, 0, 2).reshape(H, -1)
+                out = _fast_linear(
+                    act_w.reshape(1, -1), w2_flat,
+                ).to(hidden_states.dtype)                      # (1, H)
             else:
                 # --- TP mode: all 8 experts are local ---
-                # xllm warp64-safe path: gather weights → fused GEMM → combine
+                # Fused single-GEMV path: both FC1 and FC2 use _fast_linear
+                # instead of bmm, and FC2 folds the weighted combine into
+                # the same GEMV — total kernel launches drop from ~10 to ~4
                 K = eids.shape[0]
                 H = hidden_states.shape[-1]
                 w13_sel = w13[eids]                                # (K, 2*I, H)
-                w2_sel = w2[eids]                                  # (K, H, I)
 
-                # FC1: single large GEMM via _fast_linear (ix_moe_bridge GEMV)
+                # FC1: single large GEMV via _fast_linear
                 gate_up = _fast_linear(
                     hidden_states,
                     w13_sel.reshape(-1, H),                        # (K*2*I, H)
@@ -2220,17 +2224,23 @@ class Qwen3_5MoeSparseBlock(nn.Module):
                     gate, up = gate_up.chunk(2, dim=-1)
                     act = F.silu(gate) * up
 
-                # FC2: bmm (K, H, I) @ (K, I, 1) → (K, H)
-                expert_out = torch.bmm(w2_sel, act.unsqueeze(-1)).squeeze(-1)
+                w2_sel = w2[eids]                                  # (K, H, I)
 
-                # Combine: xllm fused kernel or PyTorch weighted sum
                 if _USE_XLLM_MOE:
-                    # expert_out is (K, H), need (1*K, H) for combine
+                    expert_out = torch.bmm(
+                        w2_sel, act.unsqueeze(-1)).squeeze(-1)     # (K, H)
                     out = _xllm_moe.moe_combine_result(
                         expert_out, ws.float().unsqueeze(0), 1, K) # (1, H)
                 else:
-                    out = (expert_out * ws.unsqueeze(-1)).sum(
-                        0, keepdim=True).to(hidden_states.dtype)   # (1, H)
+                    # Fused FC2 + weighted combine: pre-weight activations
+                    # by routing scores, then one GEMV produces final output
+                    # sum_k ws[k] * (w2[k] @ act[k]) = W_combined @ act_weighted
+                    act_w = act * ws.unsqueeze(-1)                 # (K, I)
+                    # w2_sel (K, H, I) → permute (H, K, I) → reshape (H, K*I)
+                    w2_flat = w2_sel.permute(1, 0, 2).reshape(H, -1)
+                    out = _fast_linear(
+                        act_w.reshape(1, -1), w2_flat,             # (1,K*I) @ (H,K*I)^T
+                    ).to(hidden_states.dtype)                      # (1, H)
         else:
             # General path (prefill / multi-seq): group assignments once.
             out = torch.zeros_like(hidden_states)

@@ -2223,9 +2223,12 @@ class Qwen3_5MoeSparseBlock(nn.Module):
                     gate, up = gate_up.chunk(2, dim=-1)
                     act = F.silu(gate) * up
 
-                expert_out = torch.bmm(w2_sel, act.unsqueeze(-1)).squeeze(-1)
-                out = (expert_out * ws.unsqueeze(-1)).sum(
-                    0, keepdim=True).to(hidden_states.dtype)   # (1, H)
+                # Fused FC2 + weighted combine into single GEMV
+                act_w = act * ws.unsqueeze(-1)                 # (K_local, I)
+                w2_flat = w2_sel.permute(1, 0, 2).reshape(H, -1)
+                out = _fast_linear(
+                    act_w.reshape(1, -1), w2_flat,
+                ).to(hidden_states.dtype)                      # (1, H)
             else:
                 # --- TP mode: all 8 experts are local ---
                 # --- corex_moe_direct_routed: zero-copy indexed GEMM (warp64) ---
@@ -2310,17 +2313,23 @@ class Qwen3_5MoeSparseBlock(nn.Module):
                     gate, up = gate_up.chunk(2, dim=-1)
                     act = F.silu(gate) * up
 
-                # FC2: bmm (K_actual, H, I) @ (K_actual, I, 1) → (K_actual, H)
-                expert_out = torch.bmm(w2_sel, act.unsqueeze(-1)).squeeze(-1)
-
                 if (_USE_COREX_MOE_EXACT_REDUCE
-                        and expert_out.dtype == torch.float16
+                        and act.dtype == torch.float16
                         and ws.dtype == torch.float16
-                        and expert_out.shape[0] == 8):
+                        and K_actual == 8):
+                    # corex exact reduce needs per-expert outputs
+                    expert_out = torch.bmm(
+                        w2_sel, act.unsqueeze(-1)).squeeze(-1)     # (K_actual, H)
                     out = _corex_moe_exact_reduce.serial_float(expert_out, ws)
                 else:
-                    out = (expert_out * ws.unsqueeze(-1)).sum(
-                        0, keepdim=True).to(hidden_states.dtype)   # (1, H)
+                    # Fused FC2 + weighted combine into single GEMV
+                    # pre-weight activations, then one _fast_linear produces
+                    # the final combined MoE output directly
+                    act_w = act * ws.unsqueeze(-1)                 # (K_actual, I)
+                    w2_flat = w2_sel.permute(1, 0, 2).reshape(H, -1)
+                    out = _fast_linear(
+                        act_w.reshape(1, -1), w2_flat,
+                    ).to(hidden_states.dtype)                      # (1, H)
         else:
             # General path (prefill / multi-seq): group assignments once.
             out = torch.zeros_like(hidden_states)
