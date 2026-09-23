@@ -561,6 +561,23 @@ if env_bool("BI100_HOT_PATH_PATCH", True):
     except Exception as _e:
         print(f"[xllm] hot path patch FAILED: {_e}", file=sys.stderr, flush=True)
 
+# ---------------------------------------------------------------------------
+# Fused linear + all-reduce: single kernel replaces GEMM + NCCL fence pair
+# Source: ex_engine/python/patch_fused_linear_allreduce.py
+# Profile shows NCCL fences = 25.3% of decode step (20.3ms/80.2ms).
+# This fuses RowParallelLinear GEMM with the subsequent all-reduce,
+# eliminating ~72 fence pairs per step (attn o_proj + MoE + shared expert).
+# ---------------------------------------------------------------------------
+if env_bool("BI100_FUSED_LINEAR_ALLREDUCE", False):
+    try:
+        from ex_engine.python.patch_fused_linear_allreduce import apply_patch as _apply_fused_ar
+        _apply_fused_ar()
+        print("[xllm] fused linear_allreduce: patch applied",
+              file=sys.stderr, flush=True)
+    except Exception as _e:
+        print(f"[xllm] fused linear_allreduce FAILED: {_e}",
+              file=sys.stderr, flush=True)
+
 _MAX_IMAGE_TOKENS = 1280
 
 
