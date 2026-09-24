@@ -594,9 +594,20 @@ if _FUSED_AR:
               file=sys.stderr, flush=True)
 
 
+_fused_ar_call_count = 0
+_fused_ar_else_count = 0
+
+
 def _fused_linear_ar(input: torch.Tensor, weight: torch.Tensor,
                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     """Fused GEMM + all-reduce in one kernel launch via ix_full_bridge .so."""
+    global _fused_ar_call_count
+    _fused_ar_call_count += 1
+    if _fused_ar_call_count <= 3:
+        print(f"[fused_ar] python call #{_fused_ar_call_count} "
+              f"input={tuple(input.shape)} weight={tuple(weight.shape)} "
+              f"dtype={input.dtype} device={input.device}",
+              file=sys.stderr, flush=True)
     return _fused_ar_bridge.linear_allreduce(
         input.contiguous(), weight, bias)
 
@@ -1725,6 +1736,8 @@ class GatedDeltaNet(nn.Module):
                     normed, self.out_proj.weight,
                     getattr(self.out_proj, 'bias', None))
             else:
+                global _fused_ar_else_count
+                _fused_ar_else_count += 1
                 out, _ = self.out_proj(normed)
             return _check_gdn_finite(
                 out, layer_idx=self.layer_idx, stage="decode-output")
