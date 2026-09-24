@@ -586,12 +586,8 @@ if _FUSED_AR:
 
 def _fused_linear_ar(input: torch.Tensor, weight: torch.Tensor,
                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-    try:
-        return _fused_ar_bridge.linear_allreduce(
-            input.contiguous(), weight, bias)
-    except Exception:
-        out = F.linear(input, weight, bias)
-        return tensor_model_parallel_all_reduce(out)
+    return _fused_ar_bridge.linear_allreduce(
+        input.contiguous(), weight, bias)
 
 
 # ---------------------------------------------------------------------------

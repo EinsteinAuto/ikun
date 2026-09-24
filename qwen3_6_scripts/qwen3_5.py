@@ -596,13 +596,9 @@ if _FUSED_AR:
 
 def _fused_linear_ar(input: torch.Tensor, weight: torch.Tensor,
                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-    """Fused GEMM + all-reduce. Falls back to GEMM + separate AR on failure."""
-    try:
-        return _fused_ar_bridge.linear_allreduce(
-            input.contiguous(), weight, bias)
-    except Exception:
-        out = F.linear(input, weight, bias)
-        return tensor_model_parallel_all_reduce(out)
+    """Fused GEMM + all-reduce in one kernel launch via ix_full_bridge .so."""
+    return _fused_ar_bridge.linear_allreduce(
+        input.contiguous(), weight, bias)
 
 _MAX_IMAGE_TOKENS = 1280
 
