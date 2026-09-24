@@ -2198,7 +2198,8 @@ class Qwen3_5MoeSparseBlock(nn.Module):
         if T == 1:
             # Fast path: single token (decode).
             eids    = topk_ids[0]                              # (K,)
-            ws      = topk_weights[0].to(hidden_states.dtype)  # (K,)
+            # topk_weights already cast to hidden_states.dtype above (all 3 routing paths)
+            ws      = topk_weights[0]                          # (K,)
 
             # --- EP T=1: skip ghost experts ---
             # In EP mode, ~6/8 experts have weight=0 (non-local).
