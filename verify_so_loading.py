@@ -235,6 +235,8 @@ def main():
             "BI100_XLLM_NORM": True,
             "BI100_XLLM_ROPE": True,
             "BI100_MOE_XLLM": True,
+            # fused linear + allreduce
+            "BI100_FUSED_LINEAR_ALLREDUCE": False,
         }
 
         for env_name, default in flags.items():
@@ -244,6 +246,41 @@ def main():
 
     except Exception as e:
         print(f"  [FAIL] Could not check flags: {e}")
+
+    print(f"\n{'─' * 70}")
+    print("PHASE 5: ix_full_bridge_fused_ar.so (fused GEMM+allreduce)")
+    print(f"{'─' * 70}")
+
+    fused_ar_paths = [
+        "ex_engine/prebuilt/ix_full_bridge_fused_ar.so",
+        "qwen3_6_scripts/prebuilt/corex-3.2.3-ivcore10/ix_full_bridge_fused_ar.so",
+        "/workspace/ex_engine/prebuilt/ix_full_bridge_fused_ar.so",
+        "/usr/local/corex/lib64/ix_full_bridge_fused_ar.so",
+        "/opt/iluvatar/lib64/ix_full_bridge_fused_ar.so",
+    ]
+    found_fused = False
+    for p in fused_ar_paths:
+        if os.path.exists(p):
+            ok, msg = check_elf(p)
+            print(f"  [OK] {p} ({os.path.getsize(p):,} bytes, {msg})")
+            found_fused = True
+        else:
+            print(f"  [--] {p}: not found")
+
+    if found_fused:
+        try:
+            from ex_engine.python.patch_fused_linear_allreduce import _load_bridge
+            loaded = _load_bridge()
+            print(f"  Bridge _load_bridge() returned: {loaded}")
+            if loaded:
+                from ex_engine.python.patch_fused_linear_allreduce import _bridge_fused_ar
+                funcs = [x for x in dir(_bridge_fused_ar) if not x.startswith('_')]
+                print(f"  Bridge functions: {funcs}")
+        except Exception as e:
+            print(f"  Bridge load failed: {e}")
+    else:
+        print("  [WARN] No fused AR .so found. BI100_FUSED_LINEAR_ALLREDUCE will have no effect")
+        print("  Build from: ex_engine/csrc/ix_full_bridge_fused_ar.cu")
 
     print(f"\n{'=' * 70}")
     print(f"SUMMARY: {results['ok']}/{len(PREBUILT_SO)} .so modules loadable")
