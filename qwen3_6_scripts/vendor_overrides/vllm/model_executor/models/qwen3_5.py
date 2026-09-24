@@ -563,6 +563,38 @@ print(
 
 
 # ---------------------------------------------------------------------------
+# Fused linear + all-reduce: direct integration (NOT monkey-patch)
+# See qwen3_6_scripts/qwen3_5.py for full rationale.
+# ---------------------------------------------------------------------------
+_fused_ar_bridge = None
+_FUSED_AR = env_bool("BI100_FUSED_LINEAR_ALLREDUCE", False)
+if _FUSED_AR:
+    try:
+        from ex_engine.python.patch_fused_linear_allreduce import _load_bridge
+        if _load_bridge():
+            from ex_engine.python.patch_fused_linear_allreduce import _bridge_fused_ar
+            _fused_ar_bridge = _bridge_fused_ar
+            print(f"[xllm-vo] fused_ar bridge loaded: {_fused_ar_bridge}",
+                  file=sys.stderr, flush=True)
+        else:
+            print("[xllm-vo] fused_ar bridge .so not found",
+                  file=sys.stderr, flush=True)
+    except Exception as _e:
+        print(f"[xllm-vo] fused_ar bridge FAILED: {_e}",
+              file=sys.stderr, flush=True)
+
+
+def _fused_linear_ar(input: torch.Tensor, weight: torch.Tensor,
+                     bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    try:
+        return _fused_ar_bridge.linear_allreduce(
+            input.contiguous(), weight, bias)
+    except Exception:
+        out = F.linear(input, weight, bias)
+        return tensor_model_parallel_all_reduce(out)
+
+
+# ---------------------------------------------------------------------------
 # Qwen3.6 vision tower and vLLM 0.6 multimodal input integration
 # ---------------------------------------------------------------------------
 
@@ -1717,7 +1749,12 @@ class GatedDeltaNet(nn.Module):
             normed = _check_gdn_finite(
                 normed, layer_idx=self.layer_idx,
                 stage="decode-norm").reshape(num_seqs, -1)
-            out, _ = self.out_proj(normed)
+            if _fused_ar_bridge is not None and self.out_proj.tp_size > 1:
+                out = _fused_linear_ar(
+                    normed, self.out_proj.weight,
+                    getattr(self.out_proj, 'bias', None))
+            else:
+                out, _ = self.out_proj(normed)
             return _check_gdn_finite(
                 out, layer_idx=self.layer_idx, stage="decode-output")
 
@@ -1953,7 +1990,12 @@ class Qwen3_5FullAttention(nn.Module):
             attn_out = (attn_out
                         * torch.sigmoid(gate.float()).to(attn_out.dtype))
         with bi100_timer("full_attn.output_proj"):
-            output, _ = self.o_proj(attn_out)
+            if _fused_ar_bridge is not None and self.o_proj.tp_size > 1:
+                output = _fused_linear_ar(
+                    attn_out, self.o_proj.weight,
+                    getattr(self.o_proj, 'bias', None))
+            else:
+                output, _ = self.o_proj(attn_out)
         return output
 
 
@@ -2463,24 +2505,28 @@ class Qwen3_5MoeSparseBlock(nn.Module):
 
         with bi100_timer("moe.shared"):
             gate_up, _ = self.shared_expert_gate_up(hidden_states)
-            shared_out = self.act_fn(gate_up)
-            shared_out, _ = self.shared_expert_down(shared_out)
-            shared_out = shared_out * torch.sigmoid(gate_score)
+            shared_act = self.act_fn(gate_up)
+
+            if _fused_ar_bridge is not None and self.experts.tp_size > 1:
+                shared_out = _fused_linear_ar(
+                    shared_act, self.shared_expert_down.weight,
+                    getattr(self.shared_expert_down, 'bias', None))
+                shared_out = shared_out * torch.sigmoid(gate_score)
+            else:
+                shared_out, _ = self.shared_expert_down(shared_act)
+                shared_out = shared_out * torch.sigmoid(gate_score)
 
         # --- Reduction ---
-        # Ported from tpu-inference:
-        #   PR #2679 (df7f5b35): scatter_results / defer_all_reduce
-        #   PR #3435 (57987c2):  shared expert reduce axis under attn DP
-        #
-        # TP mode: routed_out + shared_out are both TP-partial → single all-reduce
-        # EP mode: routed_out is EP-partial, shared_out is TP-partial
-        #          Since TP group == EP group == WORLD → same single all-reduce
-        #          (defer_all_reduce pattern: combine first, reduce once)
         _ep = getattr(self.experts, '_ep_enabled', False)
         if _ep:
             from vllm.ep_fused_moe_patch import ep_reduce_output
             with bi100_timer("moe.ep_reduce"):
                 out = ep_reduce_output(routed_out, shared_out)
+        elif _fused_ar_bridge is not None and self.experts.tp_size > 1:
+            with bi100_timer("moe.routed_ar"):
+                routed_full = tensor_model_parallel_all_reduce(routed_out)
+            with bi100_timer("moe.combine"):
+                out = routed_full + shared_out
         else:
             with bi100_timer("moe.combine"):
                 out = routed_out + shared_out
