@@ -214,17 +214,29 @@ def main():
         from vllm.bi100_env import env_bool
 
         flags = {
+            # corex kernel flags (env-gated, each has a .so)
             "BI100_GDN_COREX_CAUSAL_CONV": True,
             "BI100_GDN_COREX_GATED_NORM": True,
             "BI100_GDN_COREX_BETA_DECAY": True,
             "BI100_GDN_COREX_QK_MAP": True,
             "BI100_GDN_COREX_PACKED_DECODE": False,
+            "BI100_GDN_COMBINED_QK_NORM": True,
             "BI100_ATTN_COREX_HEAD_RMS_NORM": True,
             "BI100_MOE_COREX_EXACT_REDUCE": True,
             "BI100_MOE_COREX_WEIGHT_GATHER": True,
             "BI100_MOE_COREX_DIRECT_ROUTED": False,
             "BI100_MOE_COREX_TOPK_SOFTMAX": True,
             "BI100_MOE_COREX_INDEX_COMBINE": True,
+            "BI100_MOE_BATCHED_GEMM": True,
+            # xllm kernel flags (loaded from base image .so)
+            "BI100_XLLM_ACTIVATION": True,
+            "BI100_XLLM_CACHE": True,
+            "BI100_XLLM_FUSED_QKNORM_ROPE": True,
+            "BI100_XLLM_NORM": True,
+            "BI100_XLLM_ROPE": True,
+            "BI100_MOE_XLLM": True,
+            # fused linear + allreduce
+            "BI100_FUSED_LINEAR_ALLREDUCE": False,
         }
 
         for env_name, default in flags.items():
@@ -234,6 +246,41 @@ def main():
 
     except Exception as e:
         print(f"  [FAIL] Could not check flags: {e}")
+
+    print(f"\n{'─' * 70}")
+    print("PHASE 5: ix_full_bridge_fused_ar.so (fused GEMM+allreduce)")
+    print(f"{'─' * 70}")
+
+    fused_ar_paths = [
+        "ex_engine/prebuilt/ix_full_bridge_fused_ar.so",
+        "qwen3_6_scripts/prebuilt/corex-3.2.3-ivcore10/ix_full_bridge_fused_ar.so",
+        "/workspace/ex_engine/prebuilt/ix_full_bridge_fused_ar.so",
+        "/usr/local/corex/lib64/ix_full_bridge_fused_ar.so",
+        "/opt/iluvatar/lib64/ix_full_bridge_fused_ar.so",
+    ]
+    found_fused = False
+    for p in fused_ar_paths:
+        if os.path.exists(p):
+            ok, msg = check_elf(p)
+            print(f"  [OK] {p} ({os.path.getsize(p):,} bytes, {msg})")
+            found_fused = True
+        else:
+            print(f"  [--] {p}: not found")
+
+    if found_fused:
+        try:
+            from ex_engine.python.patch_fused_linear_allreduce import _load_bridge
+            loaded = _load_bridge()
+            print(f"  Bridge _load_bridge() returned: {loaded}")
+            if loaded:
+                from ex_engine.python.patch_fused_linear_allreduce import _bridge_fused_ar
+                funcs = [x for x in dir(_bridge_fused_ar) if not x.startswith('_')]
+                print(f"  Bridge functions: {funcs}")
+        except Exception as e:
+            print(f"  Bridge load failed: {e}")
+    else:
+        print("  [WARN] No fused AR .so found. BI100_FUSED_LINEAR_ALLREDUCE will have no effect")
+        print("  Build from: ex_engine/csrc/ix_full_bridge_fused_ar.cu")
 
     print(f"\n{'=' * 70}")
     print(f"SUMMARY: {results['ok']}/{len(PREBUILT_SO)} .so modules loadable")
