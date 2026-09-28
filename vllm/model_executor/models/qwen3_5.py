@@ -95,75 +95,75 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.logger import init_logger
-from vllm.bi100_env import env_bool, env_int
+from vllm.bi100_env import env_bool, env_int, switch_wants, switch_live, switch_probe, switch_missing, switch_report, switch_state
 from vllm.bi100_profile import (bi100_profile_event_enabled,
                                 bi100_profile_flush,
                                 bi100_profile_transaction, bi100_timer)
 
-try:
+_corex_gdn_causal_conv = None
+if switch_wants("corex_gdn_causal_conv", "BI100_GDN_COREX_CAUSAL_CONV", True):
     from vllm import corex_gdn_causal_conv as _corex_gdn_causal_conv
-except ImportError:
-    _corex_gdn_causal_conv = None
+    switch_live("corex_gdn_causal_conv", _corex_gdn_causal_conv)
 
-try:
+_corex_gdn_gated_norm = None
+if switch_wants("corex_gdn_gated_norm", "BI100_GDN_COREX_GATED_NORM", True):
     from vllm import corex_gdn_gated_norm as _corex_gdn_gated_norm
-except ImportError:
-    _corex_gdn_gated_norm = None
+    switch_live("corex_gdn_gated_norm", _corex_gdn_gated_norm)
 
-try:
+_corex_gdn_beta_decay = None
+if switch_wants("corex_gdn_beta_decay", "BI100_GDN_COREX_BETA_DECAY", True):
     from vllm import corex_gdn_beta_decay as _corex_gdn_beta_decay
-except ImportError:
-    _corex_gdn_beta_decay = None
+    switch_live("corex_gdn_beta_decay", _corex_gdn_beta_decay)
 
-try:
+_corex_gdn_qk_map = None
+if switch_wants("corex_gdn_qk_map", "BI100_GDN_COREX_QK_MAP", True):
     from vllm import corex_gdn_qk_map as _corex_gdn_qk_map
-except ImportError:
-    _corex_gdn_qk_map = None
+    switch_live("corex_gdn_qk_map", _corex_gdn_qk_map)
 
-try:
+_corex_gdn_packed_decode = None
+if switch_wants("corex_gdn_packed_decode", "BI100_GDN_COREX_PACKED_DECODE", False):
     from vllm import corex_gdn_packed_decode as _corex_gdn_packed_decode
-except ImportError:
-    _corex_gdn_packed_decode = None
+    switch_live("corex_gdn_packed_decode", _corex_gdn_packed_decode)
 
-try:
+_corex_attn_head_rms_norm = None
+if switch_wants("corex_attn_head_rms_norm", "BI100_ATTN_COREX_HEAD_RMS_NORM", True):
     from vllm import corex_attn_head_rms_norm as _corex_attn_head_rms_norm
-except ImportError:
-    _corex_attn_head_rms_norm = None
+    switch_live("corex_attn_head_rms_norm", _corex_attn_head_rms_norm)
 
-try:
+_corex_moe_exact_reduce = None
+if switch_wants("corex_moe_exact_reduce", "BI100_MOE_COREX_EXACT_REDUCE", True):
     from vllm import corex_moe_exact_reduce as _corex_moe_exact_reduce
-except ImportError:
-    _corex_moe_exact_reduce = None
+    switch_live("corex_moe_exact_reduce", _corex_moe_exact_reduce)
 
-try:
+_corex_moe_weight_gather = None
+if switch_wants("corex_moe_weight_gather", "BI100_MOE_COREX_WEIGHT_GATHER", True):
     from vllm import corex_moe_weight_gather as _corex_moe_weight_gather
-except ImportError:
-    _corex_moe_weight_gather = None
+    switch_live("corex_moe_weight_gather", _corex_moe_weight_gather)
 
-try:
+_corex_moe_direct_routed = None
+if switch_wants("corex_moe_direct_routed", "BI100_MOE_COREX_DIRECT_ROUTED", False):
     from vllm import corex_moe_direct_routed as _corex_moe_direct_routed
-except ImportError:
-    _corex_moe_direct_routed = None
+    switch_live("corex_moe_direct_routed", _corex_moe_direct_routed)
 
-try:
+_corex_batched_gemm = None
+if switch_wants("corex_batched_gemm", "BI100_MOE_BATCHED_GEMM", True):
     from vllm import corex_batched_gemm as _corex_batched_gemm
-except ImportError:
-    _corex_batched_gemm = None
+    switch_live("corex_batched_gemm", _corex_batched_gemm)
 
-try:
+_gemm_grouped = None
+if switch_wants("gemm_grouped", "BI100_MOE_GEMM_GROUPED", True):
     from vllm import gemm_grouped as _gemm_grouped
-except ImportError:
-    _gemm_grouped = None
+    switch_live("gemm_grouped", _gemm_grouped)
 
-try:
+_corex_moe_topk_softmax = None
+if switch_wants("corex_moe_topk_softmax", "BI100_MOE_COREX_TOPK_SOFTMAX", True):
     from vllm import corex_moe_topk_softmax as _corex_moe_topk_softmax
-except ImportError:
-    _corex_moe_topk_softmax = None
+    switch_live("corex_moe_topk_softmax", _corex_moe_topk_softmax)
 
-try:
+_corex_moe_index_combine = None
+if switch_wants("corex_moe_index_combine", "BI100_MOE_COREX_INDEX_COMBINE", True):
     from vllm import corex_moe_index_combine as _corex_moe_index_combine
-except ImportError:
-    _corex_moe_index_combine = None
+    switch_live("corex_moe_index_combine", _corex_moe_index_combine)
 
 try:
     from vllm import xllm_moe as _xllm_moe
@@ -174,41 +174,39 @@ except ImportError:
         _xllm_moe = None
 
 # --- xllm prebuilt kernel loading (PRD build) ---
-def _load_xllm_prebuilt(name):
-    """Load a prebuilt xllm .so from corex-3.2.3-ivcore10 directory."""
+def _load_xllm_prebuilt(name, env):
+    """Load a prebuilt xllm .so. No try/except: a broken .so raises here."""
     import importlib.util as _ilu
+    _here = os.path.dirname(os.path.abspath(__file__))
     _search = [
+        # same convention as ix_moe_bridge / xllm_cache in _custom_ops.py:
+        # module directory first, then the vllm package root
+        os.path.join(_here, f"{name}.so"),
+        os.path.normpath(os.path.join(_here, "..", "..", f"{name}.so")),
+        os.path.join(_here, "prebuilt", "corex-3.2.3-ivcore10", f"{name}.so"),
         f"/workspace/qwen3_6_scripts/prebuilt/corex-3.2.3-ivcore10/{name}.so",
-        os.path.join(os.path.dirname(__file__), "prebuilt",
-                     "corex-3.2.3-ivcore10", f"{name}.so"),
-        # When patch_ops.sh copies this file into vllm package, __file__
-        # points to vllm/model_executor/models/ — look back up to workspace
-        f"/home/dylan/0814/project_6/qwen3_6_scripts/prebuilt/corex-3.2.3-ivcore10/{name}.so",
-        # .so installed to VLLM_ROOT by install_prebuilt_corex.sh
-        os.path.join(os.path.dirname(__file__), "..", "..", f"{name}.so"),
     ]
     for _p in _search:
-        if os.path.isfile(_p):
-            print(f"[xllm] loading {name} from {_p} ...", file=sys.stderr, flush=True)
-            try:
-                _spec = _ilu.spec_from_file_location(name, _p)
-                _mod = _ilu.module_from_spec(_spec)
-                _spec.loader.exec_module(_mod)
-                print(f"[xllm] {name} OK: {[x for x in dir(_mod) if not x.startswith('_')]}", file=sys.stderr, flush=True)
-                return _mod
-            except Exception as _e:
-                print(f"[xllm] {name} FAILED: {_e}", file=sys.stderr, flush=True)
-                return None
-    print(f"[xllm] {name} not found", file=sys.stderr, flush=True)
-    return None
+        _hit = os.path.isfile(_p)
+        switch_probe(name, _p, _hit)
+        if _hit:
+            _spec = _ilu.spec_from_file_location(name, _p)
+            _mod = _ilu.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            return switch_live(name, _mod, _p)
+    switch_missing(name, env, _search)
 
-print("[xllm] loading prebuilt kernels ...", file=sys.stderr, flush=True)
-_xllm_norm = _load_xllm_prebuilt("xllm_norm")
-_xllm_rope = _load_xllm_prebuilt("xllm_rope")
-_xllm_activation = _load_xllm_prebuilt("xllm_activation")
-_xllm_cache = _load_xllm_prebuilt("xllm_cache")
-_xllm_fused_qknorm_rope = _load_xllm_prebuilt("xllm_fused_qknorm_rope")
-print("[xllm] prebuilt kernel loading done", file=sys.stderr, flush=True)
+print("========xllm prebuilt kernel loading start============", flush=True)
+_xllm_norm = _xllm_rope = _xllm_activation = None
+_xllm_cache = _xllm_fused_qknorm_rope = None
+for _nm, _env in (("xllm_norm", "BI100_XLLM_NORM"),
+                  ("xllm_rope", "BI100_XLLM_ROPE"),
+                  ("xllm_activation", "BI100_XLLM_ACTIVATION"),
+                  ("xllm_cache", "BI100_XLLM_CACHE"),
+                  ("xllm_fused_qknorm_rope", "BI100_XLLM_FUSED_QKNORM_ROPE")):
+    if switch_wants(_nm, _env, True):
+        globals()["_" + _nm] = _load_xllm_prebuilt(_nm, _env)
+print("========xllm prebuilt kernel loading done============", flush=True)
 
 # ix_moe_bridge: direct GEMV (4.1x faster than F.linear for decode M=1)
 # Benchmark: F.linear 133us vs br.linear 32us on BI-V100

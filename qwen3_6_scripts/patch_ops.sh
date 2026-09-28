@@ -579,7 +579,59 @@ fi
 build_stage "patch script completed"
 build_stage "installing ix_fused_moe 7-step pipeline and ex_engine"
 cp ./ix_fused_moe.py "${VLLM_ROOT}/model_executor/models/ix_fused_moe.py"
-if [[ -d "./ex_engine" ]]; then
-    cp -rf ./ex_engine "${VLLM_ROOT}/../ex_engine"
-    cp -rf ./ex_engine /workspace/ex_engine 2>/dev/null || true
+# ex_engine lives at the repo root, not under qwen3_6_scripts/, and this script
+# has already cd'd into qwen3_6_scripts/. "./ex_engine" never existed, so this
+# block has been skipped on every run since it was written -- silently, because
+# [[ -d ]] returning false is not an error. That is why ex_engine had to be
+# copied by hand on the machine.
+if [[ ! -d "../ex_engine" ]]; then
+    echo "[FATAL] ../ex_engine not found from $(pwd) -- cannot deploy ex_engine"
+    exit 1
 fi
+cp -rf ../ex_engine "${VLLM_ROOT}/../ex_engine"
+cp -rf ../ex_engine /workspace/ex_engine 2>/dev/null || true
+echo "========deployed ex_engine -> ${VLLM_ROOT}/../ex_engine============"
+
+build_stage "verifying deployed files match their source"
+# The runtime qwen3_5.py was 3418 lines while every source copy in the repo was
+# 3326 or 3530. Nothing detected that, because nothing compared them. A deploy
+# that silently does not take is the most expensive failure in this project:
+# every measurement after it describes code nobody is looking at.
+_drift=0
+_check_pair() {
+    local src="$1" dst="$2"
+    if [[ ! -f "$src" ]]; then
+        echo "@@@@@@@@deploy-check MISSING SOURCE $src@@@@@@@@"
+        _drift=$((_drift + 1))
+        return
+    fi
+    if [[ ! -f "$dst" ]]; then
+        echo "@@@@@@@@deploy-check NOT DEPLOYED $dst@@@@@@@@"
+        _drift=$((_drift + 1))
+        return
+    fi
+    local a b
+    a="$(md5sum "$src" | cut -d' ' -f1)"
+    b="$(md5sum "$dst" | cut -d' ' -f1)"
+    if [[ "$a" == "$b" ]]; then
+        echo "========deploy-check OK   ${a:0:8}  $(basename "$dst")============"
+    else
+        echo "@@@@@@@@deploy-check DRIFT src=${a:0:8} dst=${b:0:8} $dst@@@@@@@@"
+        _drift=$((_drift + 1))
+    fi
+}
+
+_check_pair "./qwen3_5.py"             "${VLLM_ROOT}/model_executor/models/qwen3_5.py"
+_check_pair "./bi100_env.py"           "${VLLM_ROOT}/bi100_env.py"
+_check_pair "./gdn_prefix.py"          "${VLLM_ROOT}/gdn_prefix.py"
+_check_pair "./_custom_ops.py"         "${VLLM_ROOT}/_custom_ops.py"
+_check_pair "./block_major_kv_cache.py" "${VLLM_ROOT}/block_major_kv_cache.py"
+_check_pair "./ix_fused_moe.py"        "${VLLM_ROOT}/model_executor/models/ix_fused_moe.py"
+_check_pair "../ex_engine/python/patch_fused_linear_allreduce.py" \
+            "${VLLM_ROOT}/../ex_engine/python/patch_fused_linear_allreduce.py"
+
+if [[ "$_drift" -gt 0 ]]; then
+    echo "[FATAL] $_drift deployed file(s) do not match their source"
+    exit 1
+fi
+echo "========deploy-check all sources match the runtime============"
