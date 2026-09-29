@@ -1523,15 +1523,30 @@ class PagedAttention:
         head_mapping = torch.repeat_interleave(
             torch.arange(num_kv_heads, dtype=torch.int32, device=query.device),
             num_queries_per_kv)
-        actual_max = int(seq_lens.max().item()) if seq_lens.numel() > 0 else max_seq_len
+        # perf: cache actual_max to skip GPU->CPU sync (.item()) on every call
+        # in pure decode phase seq_lens grows by exactly 1 each step, so
+        # we only need a full .item() on the first call or when batch changes
+        _cache = getattr(PagedAttention, '_decode_max_cache', None)
+        _batch_key = (seq_lens.data_ptr(), seq_lens.numel())
+        if (_cache is not None
+                and _cache[0] == _batch_key
+                and seq_lens.numel() > 0):
+            # same batch, increment by 1 (decode step)
+            actual_max = _cache[1] + 1
+            PagedAttention._decode_max_cache = (_batch_key, actual_max)
+        else:
+            actual_max = int(seq_lens.max().item()) if seq_lens.numel() > 0 else max_seq_len
+            PagedAttention._decode_max_cache = (_batch_key, actual_max)
         # Guard against uninitialized seq_lens entries (0x7FFF7FFF pattern)
         # from chunked prefill + GDN capture boundary metadata race.
         if actual_max > max_seq_len:
-            import logging as _logging
-            _logging.getLogger(__name__).warning(
-                "[BI100 PAGED_ATTN] seq_lens contains value %d > max_seq_len %d, "
-                "clamping (likely uninitialized metadata from chunked prefill)",
-                actual_max, max_seq_len)
+            if not getattr(PagedAttention, '_clamp_warned', False):
+                PagedAttention._clamp_warned = True
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "[BI100 PAGED_ATTN] seq_lens contains value %d > max_seq_len %d, "
+                    "clamping (likely uninitialized metadata from chunked prefill)",
+                    actual_max, max_seq_len)
             seq_lens = seq_lens.clamp(max=max_seq_len)
             actual_max = max_seq_len
         block_size = value_cache.shape[3]
