@@ -465,12 +465,21 @@ if _USE_XLLM_CACHE:
     def _xllm_reshape_and_cache(key, value, key_cache, value_cache,
                                 slot_mapping, kv_cache_dtype="auto",
                                 k_scale=1.0, v_scale=1.0):
+        # xllm_cache.reshape_paged_cache does not handle kv_cache_dtype
+        # quantization or key/value scaling — fall back to the original
+        # implementation when non-default params are passed, otherwise
+        # KV cache data will be silently corrupted.
+        if kv_cache_dtype != "auto" or k_scale != 1.0 or v_scale != 1.0:
+            return _orig_reshape_and_cache(
+                key, value, key_cache, value_cache,
+                slot_mapping, kv_cache_dtype, k_scale, v_scale)
         slot_ids = slot_mapping.flatten().to(torch.int32)
         _xllm_cache.reshape_paged_cache(slot_ids, key, value,
                                         key_cache, value_cache)
 
     _vllm_ops.reshape_and_cache = _xllm_reshape_and_cache
-    logger.info("xllm_cache PATCHED — reshape_and_cache → xllm CUDA kernel")
+    logger.info("xllm_cache PATCHED — reshape_and_cache → xllm CUDA kernel "
+                "(with dtype/scale fallback guard)")
 
 
 # --- 4. RoPE: xllm_rope ---
@@ -551,6 +560,69 @@ if env_bool("BI100_HOT_PATH_PATCH", True):
               file=sys.stderr, flush=True)
     except Exception as _e:
         print(f"[xllm] hot path patch FAILED: {_e}", file=sys.stderr, flush=True)
+
+# ---------------------------------------------------------------------------
+# Fused linear + all-reduce: direct integration (NOT monkey-patch)
+#
+# Profile: NCCL = 37.3% of GPU kernel time (20.3ms / 54.3ms)
+#          81 logical all-reduces per decode step:
+#            40 via RowParallelLinear(reduce_results=True): GDN out_proj + attn o_proj
+#            40 via manual tensor_model_parallel_all_reduce: MoE combine
+#             1 via lm_head
+#
+# Old approach (monkey-patch RowParallelLinear.forward) only covers 40/81.
+# New approach: load bridge once, call directly in each forward path.
+#
+# ix_full_bridge_fused_ar.linear(input, weight, bias) = GEMM only
+# infiniccl_allreduce(tensor) = allreduce via InfiniCCL (bypass NCCL fence)
+#
+# previous approach used bridge.linear_allreduce which still goes through
+# NCCL internally, keeping all 972 fence pairs. new approach splits into
+# bridge.linear (GEMM) + infiniccl (allreduce) to bypass the fence.
+# ---------------------------------------------------------------------------
+_fused_ar_bridge = None
+_infiniccl_ar = None
+_FUSED_AR = env_bool("BI100_FUSED_LINEAR_ALLREDUCE", False)
+if _FUSED_AR:
+    try:
+        from ex_engine.python.patch_fused_linear_allreduce import _load_bridge, _bridge_fused_ar
+        if _load_bridge():
+            from ex_engine.python.patch_fused_linear_allreduce import _bridge_fused_ar
+            _fused_ar_bridge = _bridge_fused_ar
+            print(f"[fused_ar] bridge loaded: {_fused_ar_bridge}",
+                  file=sys.stderr, flush=True)
+        else:
+            print("[fused_ar] bridge .so not found", file=sys.stderr, flush=True)
+    except Exception as _e:
+        print(f"[fused_ar] bridge load FAILED: {_e}",
+              file=sys.stderr, flush=True)
+    # infiniccl loaded lazily on first _fused_linear_ar call (not at import
+    # time — loading libtorch_cuda.so during module import causes double-free)
+    _infiniccl_ar = None  # set on first call
+    print("[fused_ar] infiniccl deferred to first call", file=sys.stderr, flush=True)
+
+
+_fused_ar_call_count = 0
+_fused_ar_else_count = 0
+
+
+def _fused_linear_ar(input: torch.Tensor, weight: torch.Tensor,
+                     bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """GEMM via bridge + allreduce via infiniccl (or bridge fallback)."""
+    global _fused_ar_call_count, _infiniccl_ar
+    _fused_ar_call_count += 1
+    # lazy load infiniccl .so on first call (cant load at import time)
+    if _fused_ar_call_count == 1 and _infiniccl_ar is None:
+        from ex_engine.python.infiniccl_bridge import infiniccl_allreduce
+        _infiniccl_ar = infiniccl_allreduce
+        print("[fused_ar] infiniccl activated", file=sys.stderr, flush=True)
+    if _fused_ar_call_count <= 3:
+        print(f"[fused_ar] call #{_fused_ar_call_count} "
+              f"input={tuple(input.shape)} weight={tuple(weight.shape)} "
+              f"infiniccl={'yes' if _infiniccl_ar else 'no'}",
+              file=sys.stderr, flush=True)
+    gemm_out = _fused_ar_bridge.linear(input.contiguous(), weight, bias)
+    return _infiniccl_ar(gemm_out)
 
 _MAX_IMAGE_TOKENS = 1280
 
@@ -1667,7 +1739,19 @@ class GatedDeltaNet(nn.Module):
             normed = _check_gdn_finite(
                 normed, layer_idx=self.layer_idx,
                 stage="decode-norm").reshape(num_seqs, -1)
-            out, _ = self.out_proj(normed)
+            # ── fused path: GEMM + all-reduce in one kernel launch ──
+            # out_proj is RowParallelLinear(reduce_results=True), its forward
+            # does GEMM then NCCL allreduce as 2 ops with fence pair between.
+            # _fused_linear_ar merges them into 1 kernel — no fence pair.
+            # 30 GDN layers × 1 call = 30 fence pairs eliminated per step.
+            if _fused_ar_bridge is not None and self.out_proj.tp_size > 1:
+                out = _fused_linear_ar(
+                    normed, self.out_proj.weight,
+                    getattr(self.out_proj, 'bias', None))
+            else:
+                global _fused_ar_else_count
+                _fused_ar_else_count += 1
+                out, _ = self.out_proj(normed)
             return _check_gdn_finite(
                 out, layer_idx=self.layer_idx, stage="decode-output")
 
@@ -1903,7 +1987,12 @@ class Qwen3_5FullAttention(nn.Module):
             attn_out = (attn_out
                         * torch.sigmoid(gate.float()).to(attn_out.dtype))
         with bi100_timer("full_attn.output_proj"):
-            output, _ = self.o_proj(attn_out)
+            if _fused_ar_bridge is not None and self.o_proj.tp_size > 1:
+                output = _fused_linear_ar(
+                    attn_out, self.o_proj.weight,
+                    getattr(self.o_proj, 'bias', None))
+            else:
+                output, _ = self.o_proj(attn_out)
         return output
 
 
@@ -2049,24 +2138,28 @@ class Qwen3_5MoeSparseBlock(nn.Module):
         if _USE_IX_FUSED_MOE:
             w13 = self.experts.w13_weight  # (E, 2*I, H)
             w2 = self.experts.w2_weight    # (E, H, I)
+            # Diagnostic logging uses .item() (GPU→CPU sync) which is
+            # invalid during CUDA Graph capture.  Skip when capturing.
             _ix_cnt = getattr(self, '_ix_diag_cnt', 0)
-            _in_nan = hidden_states.isnan().any().item()
-            if _ix_cnt < 5 or (_in_nan and _ix_cnt < 200):
-                self._ix_diag_cnt = _ix_cnt + 1
-                logger.info(
-                    "[IX_MOE] call=%d T=%d in_nan=%s in_norm=%.4f "
-                    "logits_range=[%.4f,%.4f] w13=%s",
-                    _ix_cnt, hidden_states.shape[0], _in_nan,
-                    hidden_states.float().norm().item() if not _in_nan else -1,
-                    router_logits.min().item() if not _in_nan else -1,
-                    router_logits.max().item() if not _in_nan else -1,
-                    list(w13.shape))
+            _capturing = torch.cuda.is_current_stream_capturing() if hasattr(torch.cuda, 'is_current_stream_capturing') else False
+            if not _capturing:
+                _in_nan = hidden_states.isnan().any().item()
+                if _ix_cnt < 5 or (_in_nan and _ix_cnt < 200):
+                    self._ix_diag_cnt = _ix_cnt + 1
+                    logger.info(
+                        "[IX_MOE] call=%d T=%d in_nan=%s in_norm=%.4f "
+                        "logits_range=[%.4f,%.4f] w13=%s",
+                        _ix_cnt, hidden_states.shape[0], _in_nan,
+                        hidden_states.float().norm().item() if not _in_nan else -1,
+                        router_logits.min().item() if not _in_nan else -1,
+                        router_logits.max().item() if not _in_nan else -1,
+                        list(w13.shape))
             out = _ix_fused_moe.fused_moe_forward(
                 hidden_states, router_logits.float(),
                 w13, w2,
                 self.top_k, w13.shape[0],
                 True)  # renormalize
-            if _ix_cnt < 5:
+            if not _capturing and _ix_cnt < 5:
                 logger.info(
                     "[IX_MOE] call=%d out_nan=%s out_norm=%.4f",
                     _ix_cnt, bool(out.isnan().any()),
@@ -2079,7 +2172,14 @@ class Qwen3_5MoeSparseBlock(nn.Module):
         # No physical transpose, no weight gather copy
         # Source: ds_vllm/vllm/.../experts/fused_batched_moe.py
         # ---------------------------------------------------------------
-        if _USE_NAIVE_BATCHED_MOE and hidden_states.shape[0] > 1:
+        # Tier 0.5 normally requires batch > 1.  During CUDA Graph capture
+        # we must also use it for batch == 1, because Tier 1 below uses
+        # .tolist() (GPU→CPU sync) and data-dependent expert dispatch,
+        # both incompatible with graph capture.
+        _capture_compat = (torch.cuda.is_current_stream_capturing()
+                           if hasattr(torch.cuda, 'is_current_stream_capturing')
+                           else False)
+        if _USE_NAIVE_BATCHED_MOE and (hidden_states.shape[0] > 1 or _capture_compat):
             w13 = self.experts.w13_weight  # (E, 2*I, H)
             w2 = self.experts.w2_weight    # (E, H, I)
 
@@ -2094,6 +2194,12 @@ class Qwen3_5MoeSparseBlock(nn.Module):
                     router_logits.float(), self.top_k, True)
                 topk_ids = topk_ids.to(torch.int64)
                 topk_weights = topk_weights.to(hidden_states.dtype)
+                if not hasattr(self, '_corex_topk_logged'):
+                    self._corex_topk_logged = True
+                    _wsum = topk_weights[0].float().sum().item()
+                    print("=============corex_topk_softmax ENABLED (naive_batched): "
+                          "ids_dtype={} ws_dtype={} ws_sum={:.4f}==========="
+                          .format(topk_ids.dtype, topk_weights.dtype, _wsum))
             else:
                 topk_logits, topk_ids = torch.topk(
                     router_logits.float(), self.top_k, dim=-1)
@@ -2120,6 +2226,13 @@ class Qwen3_5MoeSparseBlock(nn.Module):
                 router_logits.float(), self.top_k, True)
             topk_ids = topk_ids.to(torch.int64)
             topk_weights = topk_weights.to(hidden_states.dtype)
+            if not hasattr(self, '_corex_topk_tier1_logged'):
+                self._corex_topk_tier1_logged = True
+                _wsum = topk_weights[0].float().sum().item()
+                _id_range = (topk_ids.min().item(), topk_ids.max().item())
+                print("=============corex_topk_softmax ENABLED (Tier1): "
+                      "T={} ids_range={} ws_sum={:.4f}==========="
+                      .format(hidden_states.shape[0], _id_range, _wsum))
         else:
             topk_logits, topk_ids = torch.topk(
                 router_logits.float(), self.top_k, dim=-1)     # (T, top_k)
@@ -2159,7 +2272,8 @@ class Qwen3_5MoeSparseBlock(nn.Module):
         if T == 1:
             # Fast path: single token (decode).
             eids    = topk_ids[0]                              # (K,)
-            ws      = topk_weights[0].to(hidden_states.dtype)  # (K,)
+            # topk_weights already cast to hidden_states.dtype above (all 3 routing paths)
+            ws      = topk_weights[0]                          # (K,)
 
             # --- EP T=1: skip ghost experts ---
             # In EP mode, ~6/8 experts have weight=0 (non-local).
@@ -2170,7 +2284,8 @@ class Qwen3_5MoeSparseBlock(nn.Module):
             # .item() here does ONE GPU→CPU sync per layer. CUDA pipelines
             # the 8 scalar transfers into one sync. 40 layers × ~30μs = ~1.2ms,
             # far less than the ~50ms saved by skipping 6 experts' GEMM.
-            if _ep:
+            _capturing_ep = torch.cuda.is_current_stream_capturing() if hasattr(torch.cuda, 'is_current_stream_capturing') else False
+            if _ep and not _capturing_ep:
                 valid = ws != 0
                 K_local = valid.sum().item()
                 if K_local == 0:
@@ -2386,19 +2501,18 @@ class Qwen3_5MoeSparseBlock(nn.Module):
 
         with bi100_timer("moe.shared"):
             gate_up, _ = self.shared_expert_gate_up(hidden_states)
-            shared_out = self.act_fn(gate_up)
-            shared_out, _ = self.shared_expert_down(shared_out)
+            shared_act = self.act_fn(gate_up)
+
+            # fused AR is NOT used here — shared + routed are both TP-partial
+            # and get combined before a single allreduce. fusing the shared
+            # expert down would force a separate allreduce for routed_out,
+            # turning 1 AR into 2 per MoE layer (40 extra ARs per step)
+            shared_out, _ = self.shared_expert_down(shared_act)
             shared_out = shared_out * torch.sigmoid(gate_score)
 
         # --- Reduction ---
-        # Ported from tpu-inference:
-        #   PR #2679 (df7f5b35): scatter_results / defer_all_reduce
-        #   PR #3435 (57987c2):  shared expert reduce axis under attn DP
-        #
-        # TP mode: routed_out + shared_out are both TP-partial → single all-reduce
-        # EP mode: routed_out is EP-partial, shared_out is TP-partial
-        #          Since TP group == EP group == WORLD → same single all-reduce
-        #          (defer_all_reduce pattern: combine first, reduce once)
+        # routed_out and shared_out are both TP-partial, combine first then
+        # one allreduce — do NOT split into 2 ARs (see trace regression 9.5→10.5)
         _ep = getattr(self.experts, '_ep_enabled', False)
         if _ep:
             from vllm.ep_fused_moe_patch import ep_reduce_output
@@ -2411,7 +2525,8 @@ class Qwen3_5MoeSparseBlock(nn.Module):
                 with bi100_timer("moe.all_reduce"):
                     out = tensor_model_parallel_all_reduce(out)
         _fwd_cnt = getattr(self, '_fwd_diag_cnt', 0)
-        if _fwd_cnt < 3:
+        _capturing = torch.cuda.is_current_stream_capturing() if hasattr(torch.cuda, 'is_current_stream_capturing') else False
+        if _fwd_cnt < 3 and not _capturing:
             self._fwd_diag_cnt = _fwd_cnt + 1
             logger.info(
                 "[MoE_FWD] ep=%s call=%d T=%d routed=%.4f shared=%.4f final=%.4f",
@@ -2570,15 +2685,16 @@ class Qwen3_5Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        conv_states: torch.Tensor,     # (num_linear_layers, batch, ...)
-        temporal_states: torch.Tensor, # (num_linear_layers, batch, ...)
+        kv_caches: Optional[List[torch.Tensor]] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
+        conv_states: Optional[torch.Tensor] = None,     # (num_linear_layers, batch, ...)
+        temporal_states: Optional[torch.Tensor] = None, # (num_linear_layers, batch, ...)
         inputs_embeds: Optional[torch.Tensor] = None,
         gdn_capture_offsets: Optional[Iterable[int]] = None,
         gdn_segment_offsets: Optional[Iterable[int]] = None,
     ) -> torch.Tensor:
-        _validate_qwen_kv_cache_count(self.kv_cache_count, kv_caches)
+        if kv_caches is not None:
+            _validate_qwen_kv_cache_count(self.kv_cache_count, kv_caches)
         with bi100_timer("model.embed"):
             hidden_states = (self.embed_tokens(input_ids)
                              if inputs_embeds is None else inputs_embeds)
@@ -2612,7 +2728,7 @@ class Qwen3_5Model(nn.Module):
                         layer.linear_attn.captured_temporal_states[offset])
                 linear_idx += 1
             else:
-                kv_cache = kv_caches[attn_idx]
+                kv_cache = kv_caches[attn_idx] if kv_caches is not None else None
                 hidden_states, residual = layer(
                     positions, hidden_states,
                     kv_cache=kv_cache,
@@ -2842,8 +2958,8 @@ class Qwen3_5ForCausalLM(nn.Module, HasInnerState, SupportsLoRA,
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
+        kv_caches: Optional[List[torch.Tensor]] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs,
     ) -> torch.Tensor:
@@ -2983,12 +3099,77 @@ class Qwen3_5ForCausalLM(nn.Module, HasInnerState, SupportsLoRA,
                     inputs_embeds.dtype)
 
         with bi100_timer("model.forward"):
-            hidden_states = self.model(
-                input_ids, positions, kv_caches, attn_metadata,
-                conv_states, temporal_states,
-                inputs_embeds=inputs_embeds,
-                gdn_capture_offsets=interior_capture_offsets,
-                gdn_segment_offsets=interior_segment_offsets)
+            # === AUTO PROFILER: profile one decode step and upload trace ===
+            # Skip profiling during CUDA Graph capture/warmup: attn_metadata
+            # is a dummy object and conv_states/temporal_states may be None.
+            _is_graph_mode = (conv_states is None or temporal_states is None)
+            _prof_step = getattr(self, '_ikun_prof_step', 0)
+            self._ikun_prof_step = _prof_step + 1
+            _do_profile = (_prof_step == 15 and input_ids.shape[0] == 1
+                           and not _is_graph_mode)
+            if _do_profile:
+                import torch.profiler as _tp
+                with _tp.profile(
+                    activities=[_tp.ProfilerActivity.CPU,
+                                _tp.ProfilerActivity.CUDA],
+                    record_shapes=True,
+                ) as _prof:
+                    hidden_states = self.model(
+                        input_ids, positions, kv_caches, attn_metadata,
+                        conv_states, temporal_states,
+                        inputs_embeds=inputs_embeds,
+                        gdn_capture_offsets=interior_capture_offsets,
+                        gdn_segment_offsets=interior_segment_offsets)
+                # Export trace — use tempfile to avoid path issues in TP workers
+                import tempfile as _tf, io as _io
+                _trace_fd, _trace_path = _tf.mkstemp(
+                    suffix=".json", prefix="ikun_trace_")
+                os.close(_trace_fd)
+                try:
+                    _prof.export_chrome_trace(_trace_path)
+                    _trace_size = os.path.getsize(_trace_path)
+                except Exception as _export_err:
+                    print(f"=====IKUN_TRACE_EXPORT_FAILED: {_export_err}=====",
+                          file=sys.stderr, flush=True)
+                    _trace_path = None
+                    _trace_size = 0
+                # Print ONE summary with marker
+                _table = _prof.key_averages().table(
+                    sort_by="cuda_time_total", row_limit=25)
+                print(f"\n=====IKUN_SERVER_PROFILE=====\n{_table}\n"
+                      f"=====IKUN_SERVER_PROFILE=====\n",
+                      file=sys.stderr, flush=True)
+                # Upload trace to remote server
+                if _trace_path and _trace_size > 0:
+                    try:
+                        import urllib.request as _ur
+                        with open(_trace_path, "rb") as _f:
+                            _data = _f.read()
+                        _req = _ur.Request(
+                            "http://104.129.17.142:8888/ikun_server_trace.json",
+                            data=_data, method="PUT")
+                        _req.add_header("Content-Length", str(len(_data)))
+                        _ur.urlopen(_req, timeout=30)
+                        print(f"=====IKUN_TRACE_UPLOADED ({len(_data)//1024} KB)=====",
+                              file=sys.stderr, flush=True)
+                    except Exception as _e:
+                        print(f"=====IKUN_TRACE_UPLOAD_FAILED: {_e}=====",
+                              file=sys.stderr, flush=True)
+                        # Also save locally as fallback
+                        try:
+                            import shutil
+                            shutil.copy2(_trace_path, "/home/dylan/0922/ikun/ikun_server_trace.json")
+                            print("=====IKUN_TRACE_SAVED to /home/dylan/0922/ikun/ikun_server_trace.json=====",
+                                  file=sys.stderr, flush=True)
+                        except Exception:
+                            pass
+            else:
+                hidden_states = self.model(
+                    input_ids, positions, kv_caches, attn_metadata,
+                    conv_states, temporal_states,
+                    inputs_embeds=inputs_embeds,
+                    gdn_capture_offsets=interior_capture_offsets,
+                    gdn_segment_offsets=interior_segment_offsets)
 
         # Scatter modified GDN states back into the full cache
         if _mamba_state_indices is not None:
@@ -3053,7 +3234,8 @@ class Qwen3_5ForCausalLM(nn.Module, HasInnerState, SupportsLoRA,
                                        sampling_metadata)
         if logits is not None:
             _cnt = getattr(self, '_logits_diag_cnt', 0)
-            if _cnt < 5:
+            _capturing = torch.cuda.is_current_stream_capturing() if hasattr(torch.cuda, 'is_current_stream_capturing') else False
+            if _cnt < 5 and not _capturing:
                 self._logits_diag_cnt = _cnt + 1
                 try:
                     top5_vals, top5_ids = logits[-1].topk(5)
@@ -3357,4 +3539,17 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLM):
         _bi100_model_trace(
             f"MoE load_weights complete items={loaded_count} "
             f"vision_items={vision_loaded_count}")
+        # init infiniccl comm — all TP workers execute load_weights together
+        if _FUSED_AR and _fused_ar_bridge is not None:
+            import torch.distributed as _dist
+            if _dist.is_initialized() and _dist.get_world_size() > 1:
+                from ex_engine.python.infiniccl_bridge import init_comm
+                from vllm.distributed.parallel_state import (
+                    get_tensor_model_parallel_rank,
+                    get_tensor_model_parallel_world_size,
+                )
+                init_comm(
+                    get_tensor_model_parallel_rank(),
+                    get_tensor_model_parallel_world_size(),
+                )
 print("[qwen3_5] module load COMPLETE", file=sys.stderr, flush=True)

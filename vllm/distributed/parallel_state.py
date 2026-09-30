@@ -23,6 +23,7 @@ If you only need to use the distributed environment without model/pipeline
 """
 import contextlib
 import gc
+import os
 import pickle
 import weakref
 from collections import namedtuple
@@ -857,8 +858,13 @@ def init_distributed_environment(
     rank: int = -1,
     distributed_init_method: str = "env://",
     local_rank: int = -1,
-    backend: str = "nccl",
+    backend: str = "",
 ):
+    if not backend:
+        if os.environ.get("BI100_FUSED_LINEAR_ALLREDUCE", "0") == "1":
+            backend = "gloo"
+        else:
+            backend = "nccl"
     logger.debug(
         "world_size=%d rank=%d local_rank=%d "
         "distributed_init_method=%s backend=%s", world_size, rank, local_rank,

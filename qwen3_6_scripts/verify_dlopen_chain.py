@@ -72,11 +72,13 @@ EXPECTED_SO = [
 
 # Env var → module name mapping (from qwen3_5.py)
 ENV_KERNEL_MAP = {
+    # corex kernels (prebuilt .so, each gated by env flag)
     "BI100_GDN_COREX_CAUSAL_CONV": "corex_gdn_causal_conv",
     "BI100_GDN_COREX_GATED_NORM": "corex_gdn_gated_norm",
     "BI100_GDN_COREX_BETA_DECAY": "corex_gdn_beta_decay",
     "BI100_GDN_COREX_QK_MAP": "corex_gdn_qk_map",
     "BI100_GDN_COREX_PACKED_DECODE": "corex_gdn_packed_decode",
+    "BI100_GDN_COMBINED_QK_NORM": None,  # flag only, no dedicated .so
     "BI100_ATTN_COREX_HEAD_RMS_NORM": "corex_attn_head_rms_norm",
     "BI100_MOE_COREX_EXACT_REDUCE": "corex_moe_exact_reduce",
     "BI100_MOE_COREX_WEIGHT_GATHER": "corex_moe_weight_gather",
@@ -84,6 +86,13 @@ ENV_KERNEL_MAP = {
     "BI100_MOE_COREX_TOPK_SOFTMAX": "corex_moe_topk_softmax",
     "BI100_MOE_COREX_INDEX_COMBINE": "corex_moe_index_combine",
     "BI100_MOE_BATCHED_GEMM": "corex_batched_gemm",
+    # xllm kernels (base image .so, gated by env flag)
+    "BI100_XLLM_ACTIVATION": "xllm_activation",
+    "BI100_XLLM_CACHE": "xllm_cache",
+    "BI100_XLLM_FUSED_QKNORM_ROPE": "xllm_fused_qknorm_rope",
+    "BI100_XLLM_NORM": "xllm_norm",
+    "BI100_XLLM_ROPE": "xllm_rope",
+    "BI100_MOE_XLLM": "xllm_moe",
 }
 
 ALWAYS_ENABLED_SO = {
@@ -144,6 +153,13 @@ def verify_env_kernel_dispatch():
     for env_var, module_name in ENV_KERNEL_MAP.items():
         env_val = os.environ.get(env_var, "<unset>")
         enabled = env_val in ("1", "true", "True")
+
+        if module_name is None:
+            # Flag-only toggle (no dedicated .so), just report the env value
+            check(f"{env_var}={env_val} → (flag only)",
+                  True, f"enabled={enabled}")
+            continue
+
         try:
             mod = importlib.import_module(f"vllm.{module_name}")
             available = mod is not None

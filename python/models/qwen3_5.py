@@ -35,6 +35,22 @@ def configure_dp(moe_block: nn.Module, dp_size: int, dp_rank: int) -> None:
     moe_block.dp_rank = dp_rank
 
 
+
+import os as _os
+
+_IKUN_TRACE = _os.environ.get("IKUN_TRACE", "0") == "1"
+
+
+def _ok(tag, val):
+    if _IKUN_TRACE:
+        print("========{}={}============".format(tag, val), flush=True)
+
+
+def _bad(tag, val):
+    if _IKUN_TRACE:
+        print("@@@@@@@@{}={}@@@@@@@@".format(tag, val), flush=True)
+
+
 def dp_forward_moe_wrapper(
     moe_block: nn.Module,
     hidden_states: torch.Tensor,
@@ -71,8 +87,10 @@ def dp_forward_moe_wrapper(
     """
     dp_size = getattr(moe_block, "dp_size", 1)
     dp_rank = getattr(moe_block, "dp_rank", 0)
+    _ok("dp_enter", "size=%d rank=%d in=%s" % (dp_size, dp_rank, tuple(hidden_states.shape)))
 
     if dp_size <= 1:
+        _ok("dp_bypass", "dp_size=1 no gather")
         return original_forward(hidden_states)
 
     token_counts = list(metadata.dp_token_counts)
@@ -100,19 +118,25 @@ def dp_forward_moe_wrapper(
         pad_size = padded_tokens - local_tokens
         if pad_size > 0:
             hidden_states = F.pad(hidden_states, (0, 0, 0, pad_size))
+        _bad("dp_padded_path", "graph=%s prefill=%s all_decode=%s pad=%d waste=%d tok"
+             % (is_graph, is_prefill, all_decode, pad_size,
+                padded_tokens * dp_size - sum(token_counts)))
         hidden_states = _dp_all_gather(
             hidden_states, dim=0, world_size=dp_size, group_name="dp"
         )
     else:
         # Compact variable-length all-gather path
         use_compact_gather = True
+        _ok("dp_compact_path", "counts=%s no padding" % (token_counts,))
         hidden_states = _dp_all_gather_variable(
             hidden_states, token_counts, dp_rank, "dp"
         )
 
     # Run MoE on the globally-gathered batch.
     # forward() handles EP all-reduce internally, output is fully reduced.
+    _ok("dp_gathered", tuple(hidden_states.shape))
     output = original_forward(hidden_states)
+    _ok("dp_moe_out", tuple(output.shape))
 
     # Slice back to local tokens
     if use_compact_gather:
@@ -122,6 +146,9 @@ def dp_forward_moe_wrapper(
         start = dp_rank * padded_tokens
         output = output.narrow(0, start, local_tokens)
 
+    if output.shape[0] != local_tokens:
+        _bad("dp_shape_mismatch", "got=%d want=%d" % (output.shape[0], local_tokens))
+    _ok("dp_exit", tuple(output.shape))
     return output
 
 

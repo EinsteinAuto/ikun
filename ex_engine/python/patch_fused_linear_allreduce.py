@@ -44,16 +44,21 @@ def _load_bridge():
     try:
         import vllm
         vllm_root = os.path.dirname(vllm.__file__)
+        search.append(os.path.join(vllm_root, "ix_full_bridge_fused_ar.so"))
         search.append(os.path.join(vllm_root, "ex_engine", "ix_full_bridge_fused_ar.so"))
         search.append(os.path.join(vllm_root, "model_executor", "models", "ix_full_bridge_fused_ar.so"))
     except ImportError:
         pass
+    # Search project-relative and system-wide install paths
+    # BI-V100 corex SDK deploys .so to /usr/local/corex/lib64/
     search.extend([
         "ex_engine/prebuilt/ix_full_bridge_fused_ar.so",
         "qwen3_6_scripts/prebuilt/corex-3.2.3-ivcore10/ix_full_bridge_fused_ar.so",
         "/workspace/ex_engine/prebuilt/ix_full_bridge_fused_ar.so",
         "/workspace/qwen3_6_scripts/prebuilt/corex-3.2.3-ivcore10/ix_full_bridge_fused_ar.so",
         "/workspace/qwen3_6_scripts/ex_engine/prebuilt/ix_full_bridge_fused_ar.so",
+        "/usr/local/corex/lib64/ix_full_bridge_fused_ar.so",
+        "/opt/iluvatar/lib64/ix_full_bridge_fused_ar.so",
     ])
 
     for path in search:
@@ -73,7 +78,7 @@ def _load_bridge():
                     logger.info("Loaded ix_full_bridge_fused_ar from %s", path)
                     return True
             except Exception as e:
-                logger.debug("Failed to load %s: %s", path, e)
+                logger.warning("Failed to load %s: %s", path, e)
 
     logger.warning("ix_full_bridge_fused_ar.so not found — fused linear_allreduce unavailable")
     return False
@@ -101,11 +106,21 @@ def _fused_row_parallel_forward(self, input_):
 
     # Decide whether to use fused path
     # CRITICAL: linear_allreduce will segfault if NCCL process group is not initialized
+    # validate process group handle exists before calling fused kernel
+    # linear_allreduce uses the default PG internally, segfaults if none
+    _pg_ok = False
+    if torch.distributed.is_initialized():
+        try:
+            _pg = torch.distributed.group.WORLD
+            _pg_ok = _pg is not None
+        except Exception:
+            pass
+
     use_fused = (
         _bridge_fused_ar is not None
         and self.reduce_results
         and self.tp_size > 1
-        and torch.distributed.is_initialized()
+        and _pg_ok
         and input_parallel.dtype == torch.float16
         and hasattr(self, 'weight')
         and self.weight.dtype == torch.float16

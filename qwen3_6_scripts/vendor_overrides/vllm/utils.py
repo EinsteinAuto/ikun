@@ -1650,17 +1650,25 @@ class ClassRegistry(UserDict[Type[T], _V]):
         return any(cls in self.data for cls in key.mro())
 
 
+_weak_ref_tensor_op = None
+_weak_ref_tensor_op_resolved = False
+
+
 def weak_ref_tensor(tensor: Any) -> Any:
     """
     Create a weak reference to a tensor.
     The new tensor will share the same data as the original tensor,
     but will not keep the original tensor alive.
+    Falls back to identity when the C++ op is unavailable (e.g. BI-V100).
     """
-    if isinstance(tensor, torch.Tensor):
+    global _weak_ref_tensor_op, _weak_ref_tensor_op_resolved
+    if not _weak_ref_tensor_op_resolved:
         from vllm import _custom_ops as ops
-        return ops.weak_ref_tensor(tensor)
-    else:
-        return tensor
+        _weak_ref_tensor_op = getattr(ops, 'weak_ref_tensor', None)
+        _weak_ref_tensor_op_resolved = True
+    if isinstance(tensor, torch.Tensor) and _weak_ref_tensor_op is not None:
+        return _weak_ref_tensor_op(tensor)
+    return tensor
 
 
 def weak_ref_tensors(

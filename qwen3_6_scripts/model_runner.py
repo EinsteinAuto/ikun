@@ -1638,6 +1638,18 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         if self.lora_config:
             self._remove_dummy_loras()
 
+        # BI100: CUDA Graph capture warmup runs dummy forward passes that
+        # write garbage into Mamba/GDN conv_state and temporal_state.
+        # These buffers are persistent (not per-request slot-mapped like
+        # KV cache), so the dirty data survives into real inference → NaN.
+        # Zero them out now.
+        if self.has_inner_state and hasattr(self.model, 'mamba_cache'):
+            mc = self.model.mamba_cache
+            if mc is not None:
+                for cache_t in mc.cache:
+                    cache_t.zero_()
+                logger.info("Zeroed Mamba/GDN state after CUDA graph capture")
+
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
         elapsed_time = end_time - start_time
@@ -2012,6 +2024,12 @@ class CUDAGraphRunner(nn.Module):
         **kwargs,
     ):
         assert self._graph is None
+        # BI100: kv_caches and attn_metadata are consumed as named params of
+        # capture() so they don't end up in **kwargs.  Models like Qwen3_5
+        # need them as forward() args, so pass them explicitly.
+        _model_extra = dict(kwargs)
+        _model_extra["kv_caches"] = kv_caches
+        _model_extra["attn_metadata"] = attn_metadata
         # Run the model a few times without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
@@ -2021,7 +2039,7 @@ class CUDAGraphRunner(nn.Module):
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_inputs,
-                **kwargs,
+                **_model_extra,
             )
         # Wait for the warm up operations to finish before proceeding with
         # Graph Capture.
@@ -2033,7 +2051,7 @@ class CUDAGraphRunner(nn.Module):
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_inputs,
-                **kwargs,
+                **_model_extra,
             )
 
             if isinstance(output_hidden_or_intermediate_states, torch.Tensor):
