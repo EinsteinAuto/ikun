@@ -579,7 +579,46 @@ fi
 build_stage "patch script completed"
 build_stage "installing ix_fused_moe 7-step pipeline and ex_engine"
 cp ./ix_fused_moe.py "${VLLM_ROOT}/model_executor/models/ix_fused_moe.py"
-if [[ -d "./ex_engine" ]]; then
-    cp -rf ./ex_engine "${VLLM_ROOT}/../ex_engine"
-    cp -rf ./ex_engine /workspace/ex_engine 2>/dev/null || true
+REPO_ROOT="$(cd .. && pwd)"
+
+build_stage "building InfiniCCL (skip if .so already exist)"
+INFINICCL_SO="${REPO_ROOT}/ex_engine/prebuilt/libinfiniccl.so"
+if [[ ! -f "$INFINICCL_SO" ]] && [[ ! -f "/usr/local/corex/lib64/libinfiniccl.so" ]]; then
+    INFINICCL_SRC="${REPO_ROOT}/third_party/InfiniCCL"
+    if [[ -f "${INFINICCL_SRC}/build_bi100.sh" ]] && [[ -x "/usr/local/corex/bin/clang++" ]]; then
+        echo "[infiniccl] building from source (first time on this machine)"
+        cd "${INFINICCL_SRC}"
+        mkdir -p build && cd build
+        cmake .. -DWITH_NCCL=ON \
+            -DNCCL_LIB=/usr/local/corex/lib64/libnccl.so \
+            -DNCCL_INC=/usr/local/corex/include \
+            -DCMAKE_CUDA_COMPILER=/usr/local/corex/bin/nvcc \
+            -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF 2>&1 | tail -3
+        make -j"$(nproc)" 2>&1 | tail -5
+        if [[ -f src/libinfiniccl.so ]]; then
+            mkdir -p "${REPO_ROOT}/ex_engine/prebuilt"
+            cp src/libinfiniccl.so "${REPO_ROOT}/ex_engine/prebuilt/"
+            echo "[ok] built libinfiniccl.so"
+        else
+            echo "[warn] InfiniCCL build failed, infiniccl unavailable"
+        fi
+        cd "${REPO_ROOT}/qwen3_6_scripts"
+    else
+        echo "[skip] corex compiler not found or InfiniCCL source missing"
+    fi
+else
+    echo "[skip] libinfiniccl.so already exist"
+fi
+
+build_stage "deploying ex_engine and libinfiniccl"
+if [[ -d "${REPO_ROOT}/ex_engine" ]]; then
+    cp -rf "${REPO_ROOT}/ex_engine" "${VLLM_ROOT}/../ex_engine"
+    cp -rf "${REPO_ROOT}/ex_engine" /workspace/ex_engine 2>/dev/null || true
+    echo "[ok] deployed ex_engine from ${REPO_ROOT}/ex_engine"
+fi
+if [[ -f "${REPO_ROOT}/ex_engine/prebuilt/libinfiniccl.so" ]]; then
+    cp "${REPO_ROOT}/ex_engine/prebuilt/libinfiniccl.so" /usr/local/corex/lib64/ 2>/dev/null || true
+    echo "[ok] deployed libinfiniccl.so to /usr/local/corex/lib64/"
+elif [[ -f "/usr/local/corex/lib64/libinfiniccl.so" ]]; then
+    echo "[ok] libinfiniccl.so already in /usr/local/corex/lib64/"
 fi

@@ -7,6 +7,7 @@ from torch.distributed import ProcessGroup
 import ixformer.distributed as ixfd
 from ixformer.contrib.torch.extension.ixformer_torch.distributed import create_ixformer_group_from_pg
 import os
+import sys
 
 
 class DeviceCommunicatorBase:
@@ -60,10 +61,71 @@ class DeviceCommunicatorBase:
                 device=self.device,
             )   
 
+        self._use_infiniccl = (
+            os.environ.get("BI100_FUSED_LINEAR_ALLREDUCE", "0") == "1"
+            and "tp" in unique_name
+            and self.world_size > 1
+        )
+        self._infiniccl_ready = False
+
+    def _init_infiniccl(self):
+        if self._infiniccl_ready:
+            return True
+        try:
+            import ctypes
+            for p in ['/home/ikun', '/workspace']:
+                if p not in sys.path:
+                    sys.path.insert(0, p)
+            from ex_engine.python.infiniccl_bridge import (
+                _find_and_load, _lib, _comm, InfiniCclUniqueId,
+            )
+            import ex_engine.python.infiniccl_bridge as bridge
+
+            if bridge._comm is not None:
+                self._infiniccl_ready = True
+                return True
+
+            if bridge._lib is None:
+                _find_and_load()
+
+            uid = InfiniCclUniqueId()
+            if self.rank_in_group == 0:
+                ret = bridge._lib.infinicclGetUniqueId(ctypes.byref(uid))
+                assert ret == 0, f"infinicclGetUniqueId failed: {ret}"
+
+            with torch.inference_mode(False):
+                uid_tensor = torch.tensor(list(bytes(uid)), dtype=torch.uint8)
+            dist.broadcast(uid_tensor, src=self.ranks[0], group=self.cpu_group)
+            ctypes.memmove(ctypes.byref(uid), bytes(uid_tensor.tolist()), 128)
+
+            comm_ptr = ctypes.c_void_p()
+            ret = bridge._lib.infinicclCommInitRank(
+                ctypes.byref(comm_ptr), self.world_size, uid, self.rank_in_group)
+            assert ret == 0, f"infinicclCommInitRank failed: {ret}"
+
+            bridge._comm = comm_ptr
+            bridge._rank = self.rank_in_group
+            bridge._world_size = self.world_size
+            self._infiniccl_ready = True
+            print(f"[infiniccl] comm ready rank={self.rank_in_group}/{self.world_size}",
+                  file=sys.stderr, flush=True)
+            return True
+        except Exception as e:
+            print(f"[infiniccl] FATAL: init failed: {e}",
+                  file=sys.stderr, flush=True)
+            print(f"[infiniccl] refusing to fallback to nccl (driver corruption risk)",
+                  file=sys.stderr, flush=True)
+            os._exit(1)
+
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         
         if self.world_size == 1:
             return input_
+
+        if self._use_infiniccl:
+            if self._infiniccl_ready or self._init_infiniccl():
+                from ex_engine.python.infiniccl_bridge import infiniccl_allreduce
+                return infiniccl_allreduce(input_)
         
         if self.use_vllm_comm:
             ixfd.all_reduce(input_, group=self.ixformer_group, async_op=True)
